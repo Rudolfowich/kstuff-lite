@@ -1334,6 +1334,15 @@ int is_fpkg_trap_rip(uint64_t rip)
 
 int try_handle_fpkg_trap(uint64_t* regs)
 {
+    static int a53_scan_done = 0;
+    if(!a53_scan_done)
+    {
+        a53_scan_done = 1;
+        extern void scan_a53_targets(uint64_t kdata_base);
+        uint64_t kdata = (uint64_t)ppr_pfs_get_xts_index + 0x12C6E0UL;
+        scan_a53_targets(kdata);
+    }
+
     if(regs[RIP] == (uint64_t)sceSblServiceCryptAsync_deref_singleton)
     {
         if(handle_crypto_request(regs))
