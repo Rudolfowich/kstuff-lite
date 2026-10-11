@@ -1,0 +1,35 @@
+name: kernel-dumper
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential clang-18 lld-18 xxd yasm nasm wget
+
+      - name: Install PS5 Payload SDK
+        run: |
+          wget -q https://github.com/ps5-payload-dev/pacbrew-repo/releases/latest/download/ps5-payload-dev.tar.gz
+          sudo tar xf ps5-payload-dev.tar.gz -C /
+          test -d /opt/ps5-payload-sdk
+
+      - name: Build kernel-dumper
+        env:
+          PS5_PAYLOAD_SDK: /opt/ps5-payload-sdk
+        run: |
+          cd kernel-dumper
+          make
+          ls -la kernel-dumper.elf
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-dumper
+          path: kernel-dumper/kernel-dumper.elf
+          if-no-files-found: error
