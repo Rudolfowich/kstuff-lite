@@ -76,8 +76,8 @@ DEF(cr0_write_ret, -0x58E983)
 DEF(store_rax_rdi, -0x1F44A2)
 
 // PPR/fPKG offsets
-DEF(ppr_pfs_get_xts_index, -0xa50a10)
-DEF(ppr_pfs_get_cmac_index, -0xa508b0)
+DEF(ppr_pfs_get_xts_index, -0xa549a0)
+DEF(ppr_pfs_get_cmac_index, -0xa54840)
 DEF(ppr_pfs_get_xts_return, -0x949bf7)
 DEF(ppr_pfs_get_cmac_return, -0x949bac)
 DEF(ppr_pfs_cleanup_keys, -0x954b90)
