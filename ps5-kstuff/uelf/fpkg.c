@@ -99,8 +99,17 @@ static const struct ppr_profile* get_ppr_profile(void)
 {
     /* Keep the newer profiles and offsets available for later work, but do
      * not arm plaintext PPR interception above 11.60. */
+#ifdef KSTUFF_FPKG_EXPERIMENT
+    /* Diagnostic-only build: arm plaintext PPR interception on the fw13
+     * profile family (13.00-13.60) so the flow can be observed on real
+     * hardware.  Firmwares inside the range without a profile still get
+     * NULL from the switch below.  Not for release builds. */
+    if(FWVER < 0x1300 || FWVER > 0x1360)
+        return NULL;
+#else
     if(FWVER > 0x1160)
         return NULL;
+#endif
 
     static const struct ppr_profile fw1_early = {
         0x126, 0x15a,
@@ -767,7 +776,13 @@ int control_ppr_plaintext_request(uint64_t magic, uint64_t mode,
     /* Mount scope tracking stays active; unsupported plaintext requests are
      * rejected, and the ShellCore wrapper returns its mount error. */
     if(!get_ppr_profile())
+    {
+#if KSTUFF_OBS
+        log_word(0x505052524e4f5052ull); /* "PPRNOPR" */
+        log_word(FWVER);
+#endif
         return EINVAL;
+    }
     if(mode == 0)
     {
         if(arg0 != PPR_PLAINTEXT_PROTOCOL_VERSION)
@@ -796,6 +811,11 @@ int control_ppr_plaintext_request(uint64_t magic, uint64_t mode,
         if(__atomic_load_n(&staging->bytes_written, __ATOMIC_ACQUIRE)
                                                    != PPR_STAGING_SIZE)
             failed |= 1ull << 8;
+#if KSTUFF_OBS
+        log_word(0x505052434845434bull); /* "PPRCHECK" */
+        log_word(mode);
+        log_word(failed);
+#endif
         *result = failed;
         return 0;
     }
@@ -871,6 +891,14 @@ static int current_ppr_plaintext_session_pending(void)
 
 static void try_emulate_plaintext_key_index(uint64_t* regs, int cmac)
 {
+#if KSTUFF_OBS
+    /* First observation of a 13.xx experiment: does the get-index trap even
+     * fire?  If PPRG6TR never appears in the word log, the PPR offsets for
+     * this firmware are wrong (devkit-derived) or the trap is not routed. */
+    log_word(0x50505247365452ull); /* "PPRG6TR" */
+    log_word((uint64_t)regs[RDI]);
+    log_word(cmac ? 0x434d4143ull : 0x58545320ull); /* "CMAC"/"XTS " */
+#endif
     METRIC_INC(ppr_plaintext_g6_traps);
     canonicalize_debug_gprs(regs);
 

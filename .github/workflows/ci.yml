@@ -36,11 +36,16 @@ jobs:
     - name: Build Payload
       run: |
         export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+        export KSTUFF_OBS=1
+        export EXTRA_CFLAGS=-DKSTUFF_FPKG_EXPERIMENT=1
         bash ci-ps5-kstuff-ldr.sh
+        cp ps5-kstuff/debug-reader.elf ps5-kstuff-ldr/ 2>/dev/null || true
 
     - name: Upload Payload
       uses: actions/upload-artifact@v4
       with:
         name: Payload
-        path: ./ps5-kstuff-ldr/kstuff.elf
+        path: |
+          ./ps5-kstuff-ldr/kstuff.elf
+          ./ps5-kstuff/debug-reader.elf
         if-no-files-found: error
