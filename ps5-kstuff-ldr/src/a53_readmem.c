@@ -121,73 +121,58 @@ step_rodata_hunt(void)
 }
 
 int
-find_mp4_cdev_in_heap(void)
+confirm_mp4_text(const uint64_t *ext_buf)
 {
-    /* [0] Находим динамический адрес str_mp4_dump для текущей сессии KASLR */
-    uint64_t target = 0;
-    static uint64_t g_str[32];
-    for (int i = 0; i < 32; i++) g_str[i] = 0;
-    kekcall(KEKCALL_SCAN_DMEM, 32, (uintptr_t)g_str, 0);
-    for (int i = 0; i < 32; i++) {
-        if (g_str[i] && (g_str[i] & 0xff) == 0xaa) {
-            target = g_str[i];
-            break;
-        }
+    /* Извлекаем 4 ioctl handler'а: ext[76], ext[80], ext[84], ext[88] */
+    uint64_t handlers[4];
+    if (ext_buf && ext_buf[76] && ext_buf[80]) {
+        handlers[0] = ext_buf[76];
+        handlers[1] = ext_buf[80];
+        handlers[2] = ext_buf[84];
+        handlers[3] = ext_buf[88];
+    } else {
+        handlers[0] = 0xffffffff9100eac9ULL;
+        handlers[1] = 0xffffffff91057a0cULL;
+        handlers[2] = 0xffffffff91062147ULL;
+        handlers[3] = 0xffffffff9100ead6ULL;
     }
-    if (!target) {
-        target = 0xffffffff90fe38aaULL;
-    }
-    klog_printf("[HEAP] target str_mp4_dump @ 0x%llx\n", (unsigned long long)target);
 
-    /* Heap zones из diag: 0xffffd4d7..., 0xffffd4df..., 0xffffdf05... */
-    uint64_t heap_zones[] = {
-        0xffffd4d700000000ULL,
-        0xffffd4df00000000ULL,
-        0xffffdf0500000000ULL,  /* ещё одна куча видна в ext[12] */
-    };
-    const char *zone_name[] = {"HEAP_LOW", "HEAP_MID", "HEAP_HIGH"};
+    for (int h = 0; h < 4; h++) {
+        /* Dump 128 bytes вокруг handler'а (-64 .. +64) */
+        uint64_t addr = handlers[h];
+        uint64_t base = (addr - 64) & ~7ULL;
 
-    for (int zone = 0; zone < 3; zone++) {
-        uint64_t base = heap_zones[zone];
-        klog_printf("[%s] base = 0x%llx\n", zone_name[zone], (unsigned long long)base);
+        uint8_t buf[128];
+        for (int i = 0; i < 128; i++) buf[i] = 0;
 
-        for (int chunk = 0; chunk < 16; chunk++) {
-            uint64_t cs = base + chunk * 1024ULL * 1024ULL;
+        long r = kekcall(KEKCALL_DUMP_MEM, base, (uintptr_t)buf, 128);
+        klog_printf("[H%d] handler @ 0x%llx (dump base 0x%llx) ret=%ld\n",
+                    h, (unsigned long long)addr,
+                    (unsigned long long)base, r);
 
-            /* KEKCALL_SCAN_PTR_CUSTOM: scan_mb=1 на адрес cs (copy_from_kernel внутри проверяет валидность) */
-            uint64_t finds[32] = {0};
-            long n = kekcall5(KEKCALL_SCAN_PTR_CUSTOM, (uintptr_t)finds, target, 1, cs);
-
-            if (n > 0) {
-                klog_printf("[%s]   chunk %d @ 0x%llx: %ld ptrs\n",
-                            zone_name[zone], chunk,
-                            (unsigned long long)cs, n);
-                for (int i = 0; i < 16; i++) {
-                    if (finds[i]) {
-                        uint64_t ptr_addr = finds[i];
-                        klog_printf("[%s]     ptr @ 0x%llx (likely struct cdev)\n",
-                                    zone_name[zone], (unsigned long long)ptr_addr);
-
-                        /* Dump 256 bytes структуры вокруг найденного указателя */
-                        uint64_t cdev_start = (ptr_addr - 0x98) & ~7ULL;  /* si_name offset ~0x98 в struct cdev */
-                        uint8_t cbuf[256];
-                        for (int b = 0; b < 256; b++) cbuf[b] = 0;
-                        if (kekcall(KEKCALL_DUMP_MEM, cdev_start, (uintptr_t)cbuf, 256) == 0) {
-                            klog_printf("[%s]     struct cdev @ 0x%llx:\n",
-                                        zone_name[zone], (unsigned long long)cdev_start);
-                            for (int b = 0; b < 256; b += 16) {
-                                klog_printf("[%s]       +0x%03x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                                    zone_name[zone], b,
-                                    cbuf[b], cbuf[b+1], cbuf[b+2], cbuf[b+3],
-                                    cbuf[b+4], cbuf[b+5], cbuf[b+6], cbuf[b+7],
-                                    cbuf[b+8], cbuf[b+9], cbuf[b+10], cbuf[b+11],
-                                    cbuf[b+12], cbuf[b+13], cbuf[b+14], cbuf[b+15]);
-                            }
-                        }
-                    }
-                }
-            }
-            sleep(1);  /* heartbeat */
+        for (int i = 0; i < 128; i += 16) {
+            klog_printf("[H%d] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x | %c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c\n",
+                h, i,
+                buf[i], buf[i+1], buf[i+2], buf[i+3],
+                buf[i+4], buf[i+5], buf[i+6], buf[i+7],
+                buf[i+8], buf[i+9], buf[i+10], buf[i+11],
+                buf[i+12], buf[i+13], buf[i+14], buf[i+15],
+                (buf[i]>=32&&buf[i]<127)?buf[i]:'.',
+                (buf[i+1]>=32&&buf[i+1]<127)?buf[i+1]:'.',
+                (buf[i+2]>=32&&buf[i+2]<127)?buf[i+2]:'.',
+                (buf[i+3]>=32&&buf[i+3]<127)?buf[i+3]:'.',
+                (buf[i+4]>=32&&buf[i+4]<127)?buf[i+4]:'.',
+                (buf[i+5]>=32&&buf[i+5]<127)?buf[i+5]:'.',
+                (buf[i+6]>=32&&buf[i+6]<127)?buf[i+6]:'.',
+                (buf[i+7]>=32&&buf[i+7]<127)?buf[i+7]:'.',
+                (buf[i+8]>=32&&buf[i+8]<127)?buf[i+8]:'.',
+                (buf[i+9]>=32&&buf[i+9]<127)?buf[i+9]:'.',
+                (buf[i+10]>=32&&buf[i+10]<127)?buf[i+10]:'.',
+                (buf[i+11]>=32&&buf[i+11]<127)?buf[i+11]:'.',
+                (buf[i+12]>=32&&buf[i+12]<127)?buf[i+12]:'.',
+                (buf[i+13]>=32&&buf[i+13]<127)?buf[i+13]:'.',
+                (buf[i+14]>=32&&buf[i+14]<127)?buf[i+14]:'.',
+                (buf[i+15]>=32&&buf[i+15]<127)?buf[i+15]:'.');
         }
     }
     return 0;
@@ -196,7 +181,7 @@ find_mp4_cdev_in_heap(void)
 int
 probe_mp4_device(void)
 {
-    find_mp4_cdev_in_heap();
+    /* Вызывается из install_ppr_a53, где ext_buf уже получен */
     return 0;
 }
 
@@ -244,6 +229,9 @@ install_ppr_a53(uint32_t system_fw_version)
             klog_printf("[a53] ext[%d] = 0x%016llx\n", i, (unsigned long long)ext_buf[i]);
         }
     }
+
+    /* Confirm MP4 ioctl handlers / driver text */
+    confirm_mp4_text(ext_buf);
 
     /* Device probe */
     if (probe_mp4_device() != 0) {
