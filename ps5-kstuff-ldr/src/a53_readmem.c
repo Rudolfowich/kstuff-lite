@@ -697,19 +697,28 @@ find_and_patch_mp4_cdevsw(void)
             close(rfd1);
         }
 
-        /* Проверяем открытие с root ucred через SWAP_FULL */
-        klog_printf("[TEST_OPEN] 2. with SWAP_FULL root ucred...\n");
-        uint64_t bkp[4] = {0};
-        long sr = kekcall(KEKCALL_SWAP_FULL, 1, (uintptr_t)bkp, 0);
-        int rfd2 = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
-        int rerr2 = errno;
-        klog_printf("[TEST_OPEN] with-swap open result: fd=%d errno=%d (swap_ret=%ld)\n", rfd2, rerr2, sr);
-        if (sr == 0) {
-            kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)bkp, 0);
+        /* 3. Дамп 192 байт mp4 cdevsw для извлечения d_open */
+        uint8_t mp4_csw_buf[192] = {0};
+        kekcall(KEKCALL_DUMP_MEM, mp4_parent_csw, (uintptr_t)mp4_csw_buf, 192);
+        uint64_t mp4_d_open_func = 0;
+        __builtin_memcpy(&mp4_d_open_func, mp4_csw_buf + 0x10, 8);
+        klog_printf("[MP4_CSW] mp4 cdevsw @ 0x%llx d_open func pointer = 0x%llx\n",
+                    (unsigned long long)mp4_parent_csw, (unsigned long long)mp4_d_open_func);
+
+        for (int off = 0; off < 64; off += 8) {
+            uint64_t val = 0;
+            __builtin_memcpy(&val, mp4_csw_buf + off, 8);
+            klog_printf("[MP4_CSW] +0x%02x = 0x%016llx\n", off, (unsigned long long)val);
         }
-        if (rfd2 >= 0) {
-            klog_printf("[TEST_OPEN] *** SUCCESS! /dev/mp4/dump_for_decid OPENED WITH ROOT UCRED! fd=%d ***\n", rfd2);
-            close(rfd2);
+
+        /* 4. Дамп первых 64 байт тела функции d_open ядра */
+        if ((mp4_d_open_func & 0xFFFF000000000000ULL) == 0xFFFF000000000000ULL) {
+            uint64_t code_words[8] = {0};
+            kekcall(KEKCALL_DUMP_MEM, mp4_d_open_func, (uintptr_t)code_words, 64);
+            klog_printf("[MP4_CODE] first 64 bytes of mp4_open (0x%llx):\n", (unsigned long long)mp4_d_open_func);
+            for (int w = 0; w < 8; w++) {
+                klog_printf("[MP4_CODE] +0x%02x: 0x%016llx\n", w * 8, (unsigned long long)code_words[w]);
+            }
         }
     } else {
         klog_printf("[WALK] Notice: no node with 'mp4' or 'dump' in name was encountered.\n");
