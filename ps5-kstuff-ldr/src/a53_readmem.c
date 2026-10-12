@@ -61,49 +61,27 @@ a53_find_profile(uint32_t fw, uint32_t cond)
 
 
 int
-dump_mp4_candidate(uint64_t cand)
+probe_text_section(void)
 {
-    uint64_t base = (cand - 256) & ~7ULL;
-    static uint64_t qwords[64];
-    for (int i = 0; i < 64; i++) qwords[i] = 0;
-
-    long r = kekcall(KEKCALL_DUMP_MEM, base, (uintptr_t)qwords, 0);
-    if (r <= 0) {
-        klog_printf("[a53] dump failed: ret=%ld\n", r);
-        return -1;
-    }
-
-    uint8_t *buf = (uint8_t*)qwords;
-    klog_printf("[a53] === dump of cand 0x%llx (base 0x%llx, ±256) ===\n",
-                (unsigned long long)cand, (unsigned long long)base);
-    for (int i = 0; i < 512; i += 16) {
-        klog_printf("[a53] +0x%03x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-            i,
-            buf[i], buf[i+1], buf[i+2], buf[i+3], buf[i+4], buf[i+5], buf[i+6], buf[i+7],
-            buf[i+8], buf[i+9], buf[i+10], buf[i+11], buf[i+12], buf[i+13], buf[i+14], buf[i+15]);
-    }
-    return 0;
-}
-
-int
-dump_ioctl_handlers(void)
-{
-    uint64_t handlers[4] = {
-        0xffffffff9033eac9ULL,
-        0xffffffff90387a0cULL,
-        0xffffffff90392147ULL,
-        0xffffffff9033ead6ULL,
+    uint64_t candidates[4] = {
+        0xffffffff92609e80ULL,  /* slot[73], ext[39] */
+        0xffffffff92994c78ULL,  /* slot[3]  */
+        0xffffffff92993798ULL,  /* slot[8]  */
+        0xffffffff91c76520ULL,  /* ext[11]  */
     };
-    for (int h = 0; h < 4; h++) {
-        uint64_t base = (handlers[h] - 128) & ~7ULL;
+    for (int c = 0; c < 4; c++) {
+        uint64_t cand = candidates[c];
+        uint64_t base = (cand - 64) & ~7ULL;
         static uint64_t qwords[64];
         for (int i = 0; i < 64; i++) qwords[i] = 0;
 
-        if (kekcall(KEKCALL_DUMP_MEM, base, (uintptr_t)qwords, 0) <= 0) continue;
-        uint8_t *buf = (uint8_t*)qwords;
+        long r = kekcall(KEKCALL_DUMP_MEM, base, (uintptr_t)qwords, 0);
+        klog_printf("[a53] cand[%d] = 0x%llx, dump base = 0x%llx, ret=%ld\n",
+                    c, (unsigned long long)cand,
+                    (unsigned long long)base, r);
+        if (r <= 0) continue;
 
-        klog_printf("[a53] === handler[%d] = 0x%llx (base 0x%llx) ===\n",
-                    h, (unsigned long long)handlers[h], (unsigned long long)base);
+        uint8_t *buf = (uint8_t*)qwords;
         for (int i = 0; i < 256; i += 16) {
             klog_printf("[a53] +0x%03x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
                 i,
@@ -117,20 +95,7 @@ dump_ioctl_handlers(void)
 int
 probe_mp4_device(void)
 {
-    /* Получаем ext_buf для динамических адресов */
-    static uint64_t ext_buf[192];
-    for (int i = 0; i < 192; i++) ext_buf[i] = 0;
-    kekcall(KEKCALL_EXT_DUMP, 0, (uintptr_t)ext_buf, sizeof(ext_buf));
-
-    uint64_t cand_ext42 = ext_buf[42] ? ext_buf[42] : 0xffffffff90316611ULL;
-    klog_printf("[a53] cand ext[42] = 0x%llx\n", (unsigned long long)cand_ext42);
-
-    /* 1. Дамп вокруг ext[42] */
-    dump_mp4_candidate(cand_ext42);
-
-    /* 2. Дамп 4-х ioctl handlers */
-    dump_ioctl_handlers();
-
+    probe_text_section();
     return 0;
 }
 
