@@ -785,6 +785,77 @@ find_and_patch_mp4_cdevsw(void)
     klog_printf("[READ_TEST] Step 2 (.rodata @ 0x%llx): ret=%ld, str='%.16s'\n",
                 (unsigned long long)rodata_v, r_rodata, rodata_bytes);
 
+    /* Шаг 3: Поиск системных демонов (decid, shellcore, etc) и тест открытия под их ucred ДО ЛЮБЫХ ПАТЧЕЙ */
+    klog_printf("[AUTH_PROBE] === Searching processes in allproc for target daemons ===\n");
+    uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+    uint64_t allproc_addr = kbase + 0x28C9E80ULL;
+    uint64_t p = 0;
+    kekcall(KEKCALL_DUMP_MEM, allproc_addr, (uintptr_t)&p, 8);
+
+    uint32_t target_pids[16] = {0};
+    char target_comms[16][32] = {{0}};
+    int ntargets = 0;
+
+    for (int cnt = 0; cnt < 300 && p && ntargets < 16; cnt++) {
+        uint64_t pid_u64 = 0;
+        char comm[32] = {0};
+        kekcall(KEKCALL_DUMP_MEM, p + 0xBC, (uintptr_t)&pid_u64, 8);
+        kekcall(KEKCALL_DUMP_MEM, p + 0x448, (uintptr_t)comm, 32);
+        comm[31] = 0;
+        uint32_t pid = (uint32_t)(pid_u64 & 0xFFFFFFFF);
+
+        if (strstr(comm, "deci") || strstr(comm, "Shell") || strstr(comm, "sys") ||
+            strstr(comm, "vsh") || strstr(comm, "kernel") || pid == 1) {
+            target_pids[ntargets] = pid;
+            strncpy(target_comms[ntargets], comm, 31);
+            klog_printf("[AUTH_TARGET] #%d pid=%u comm='%s' proc=0x%llx\n",
+                        ntargets, pid, comm, (unsigned long long)p);
+            ntargets++;
+        }
+
+        uint64_t next = 0;
+        kekcall(KEKCALL_DUMP_MEM, p + 0x00, (uintptr_t)&next, 8);
+        p = next;
+    }
+
+    /* Пробуем open("/dev/mp4/dump_for_decid") под кредами каждого найденного демона */
+    for (int t = 0; t < ntargets; t++) {
+        uint32_t tpid = target_pids[t];
+        const char *tcomm = target_comms[t];
+        uint64_t backup[4] = {0};
+
+        long sr = kekcall(KEKCALL_SWAP_FULL, tpid, (uintptr_t)backup, 0);
+        int fd_test = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
+        int err_test = errno;
+        if (fd_test < 0 && err_test == 1) {
+            /* Try O_RDONLY */
+            fd_test = open("/dev/mp4/dump_for_decid", 0x0000 /* O_RDONLY */);
+            err_test = errno;
+        }
+
+        klog_printf("[AUTH_TEST] pid=%u (%s) -> swap_ret=%ld open_fd=%d errno=%d\n",
+                    tpid, tcomm, sr, fd_test, err_test);
+
+        if (fd_test >= 0) {
+            klog_printf("[AUTH_TEST] *** BINGO! /dev/mp4/dump_for_decid OPENED NATIVELY UNDER %s (pid %u)! ***\n",
+                        tcomm, tpid);
+            /* Читаем сразу данные */
+            uint8_t native_buf[256] = {0};
+            ssize_t nr_nat = read(fd_test, native_buf, sizeof(native_buf));
+            klog_printf("[AUTH_TEST] native read nr=%zd errno=%d\n", nr_nat, errno);
+            if (nr_nat > 0) {
+                klog_printf("[AUTH_TEST] +0x00: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                            native_buf[0], native_buf[1], native_buf[2], native_buf[3],
+                            native_buf[4], native_buf[5], native_buf[6], native_buf[7]);
+            }
+            close(fd_test);
+        }
+
+        if (sr == 0) {
+            kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)backup, 0);
+        }
+    }
+
     /* Шаг 4: патчим все найденные mp4 cdevsw */
     for (int m = 0; m < mp4_count; m++) {
         uint64_t target_csw = mp4_parent_csws[m];
