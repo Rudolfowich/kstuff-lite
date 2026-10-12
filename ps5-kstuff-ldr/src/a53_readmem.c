@@ -794,33 +794,38 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     uint64_t candidate_authids[32] = {0};
     int ncandidates = 0;
 
-    /* Обход вперед (p_list.le_next @ proc + 0x00) и назад (p_list.le_prev @ proc + 0x08) */
+    /* Обход вперед (p_list.le_next @ proc + 0x10) и назад (p_list.le_prev @ proc + 0x08) */
+    sa.sa_handler = sigsys_handler;
+    sa.sa_flags = SA_NODEFER;
+    sigaction(SIGSYS, &sa, NULL);
+
     for (int dir = 0; dir < 2; dir++) {
         uint64_t cur = curproc_hint;
         for (int cnt = 0; cnt < 250 && cur; cnt++) {
+            if ((cur & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL) break;
+
             uint64_t pid_u64 = 0;
             char comm[32] = {0};
             uint64_t ucred_ptr = 0;
             uint64_t authid = 0;
 
-            kekcall(KEKCALL_DUMP_MEM, cur + 0xBC, (uintptr_t)&pid_u64, 8);
-            if (!pid_u64) {
-                kekcall(KEKCALL_DUMP_MEM, cur + 0xB0, (uintptr_t)&pid_u64, 8);
-            }
-            kekcall(KEKCALL_DUMP_MEM, cur + 0x44C, (uintptr_t)comm, 24);
-            if (!comm[0]) {
+            g_sigsys_fault = 0;
+            if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
+                kekcall(KEKCALL_DUMP_MEM, cur + 0xBC, (uintptr_t)&pid_u64, 8);
                 kekcall(KEKCALL_DUMP_MEM, cur + 0x448, (uintptr_t)comm, 24);
+                kekcall(KEKCALL_DUMP_MEM, cur + 0x40, (uintptr_t)&ucred_ptr, 8);
+                if (ucred_ptr > 0xffff800000000000ULL) {
+                    kekcall(KEKCALL_DUMP_MEM, ucred_ptr + 0x58, (uintptr_t)&authid, 8);
+                }
+            } else {
+                break;
             }
+            if (g_sigsys_fault) break;
+
             comm[23] = 0;
             uint32_t pid = (uint32_t)(pid_u64 & 0xFFFFFFFF);
 
-            kekcall(KEKCALL_DUMP_MEM, cur + 0x40, (uintptr_t)&ucred_ptr, 8);
-            if (ucred_ptr > 0xffff800000000000ULL) {
-                kekcall(KEKCALL_DUMP_MEM, ucred_ptr + 0x58, (uintptr_t)&authid, 8);
-            }
-
             if (comm[0] && pid > 0) {
-                /* Проверяем дубликаты */
                 int dup = 0;
                 for (int i = 0; i < ncandidates; i++) {
                     if (candidate_pids[i] == pid) { dup = 1; break; }
@@ -846,23 +851,24 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
             }
 
             /* Шаг перехода к следующему / предыдущему процессу */
-            if (dir == 0) {
-                /* Вперед: p_list.le_next */
-                uint64_t next = 0;
-                kekcall(KEKCALL_DUMP_MEM, cur + 0x00, (uintptr_t)&next, 8);
-                if (!next) {
-                    kekcall(KEKCALL_DUMP_MEM, cur + 0x10, (uintptr_t)&next, 8);
+            uint64_t next_proc = 0;
+            if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
+                if (dir == 0) {
+                    kekcall(KEKCALL_DUMP_MEM, cur + 0x10, (uintptr_t)&next_proc, 8);
+                } else {
+                    uint64_t prev_ptr = 0;
+                    kekcall(KEKCALL_DUMP_MEM, cur + 0x08, (uintptr_t)&prev_ptr, 8);
+                    next_proc = prev_ptr ? (prev_ptr - 0x10) : 0;
                 }
-                cur = next;
             } else {
-                /* Назад: p_list.le_prev указывает на le_next предыдущего */
-                uint64_t prev_ptr = 0;
-                kekcall(KEKCALL_DUMP_MEM, cur + 0x08, (uintptr_t)&prev_ptr, 8);
-                cur = prev_ptr ? (prev_ptr - 0x00) : 0;
-                if (cur == curproc_hint) break;
+                break;
             }
+            if (g_sigsys_fault) break;
+            if (next_proc == curproc_hint) break;
+            cur = next_proc;
         }
     }
+    signal(SIGSYS, SIG_DFL);
 
     /* Шаг 3.1: Тест открытия /dev/mp4/dump_for_decid под кредами кандидатов (РОДНОЙ d_open БЕЗ ПАТЧА!) */
     klog_printf("[REAL_OPEN] === Testing native open under %d candidates (SAFETY: no intermediate klog during swap) ===\n", ncandidates);
