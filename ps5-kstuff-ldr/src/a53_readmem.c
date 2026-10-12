@@ -393,6 +393,9 @@ sigsys_handler(int sig)
     siglongjmp(g_sigsys_jmp, 1);
 }
 
+static uint64_t g_cdevsw_list[256];
+static int g_cdevsw_count = 0;
+
 int
 scan_cdevsw(void)
 {
@@ -422,6 +425,7 @@ scan_cdevsw(void)
                 (unsigned long long)data_start, (unsigned long long)data_end);
 
     int total_cdevsw = 0;
+    g_cdevsw_count = 0;
     uint64_t mp4_cdevsw_addr = 0;
     uint64_t mp4_d_open = 0;
     (void)mp4_d_open;
@@ -471,6 +475,9 @@ scan_cdevsw(void)
             if (name[0] < 32 || name[0] > 126) continue;
 
             total_cdevsw++;
+            if (g_cdevsw_count < 256) {
+                g_cdevsw_list[g_cdevsw_count++] = cdevsw_addr;
+            }
             klog_printf("[CDVS] #%d @ 0x%llx ver=0x%08x name='%s' d_open=0x%llx\n",
                         total_cdevsw, (unsigned long long)cdevsw_addr, ver, name,
                         (unsigned long long)d_open);
@@ -551,9 +558,141 @@ scan_cdevsw(void)
     /* Восстанавливаем дефолтный обработчик SIGSYS */
     signal(SIGSYS, SIG_DFL);
 
-    if (mp4_cdevsw_addr) {
-        klog_printf("[CDVS] mp4 target confirmed at 0x%llx. Ready for d_open patch!\n",
-                    (unsigned long long)mp4_cdevsw_addr);
+    return 0;
+}
+
+/* Полноценный обход d_devs для каждого найденного cdevsw с поиском mp4 */
+int
+find_and_patch_mp4_cdevsw(void)
+{
+    uint64_t kbase = 0;
+    kekcall(KEKCALL_GET_KBASE, 0, (uintptr_t)&kbase, 0);
+    uint64_t justreturn_addr = kbase - 0xA686F0ULL;
+
+    klog_printf("[WALK] starting cdevsw d_devs walk for %d drivers...\n", g_cdevsw_count);
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sigsys_handler;
+    sa.sa_flags = SA_NODEFER;
+    sigaction(SIGSYS, &sa, NULL);
+
+    uint64_t found_cdevsw = 0;
+    uint64_t found_cdev = 0;
+    char found_name[64] = {0};
+
+    for (int idx = 0; idx < g_cdevsw_count; idx++) {
+        uint64_t csw = g_cdevsw_list[idx];
+        uint64_t first_cdev = 0;
+
+        g_sigsys_fault = 0;
+        if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
+            kekcall(KEKCALL_DUMP_MEM, csw + 0xa8ULL, (uintptr_t)&first_cdev, 8);
+        } else {
+            continue;
+        }
+        if (g_sigsys_fault || !first_cdev) continue;
+
+        uint64_t cur_cdev = first_cdev;
+        int depth = 0;
+        uint64_t seen[64] = {0};
+
+        while (cur_cdev && depth < 50) {
+            if ((cur_cdev & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL) break;
+
+            int is_loop = 0;
+            for (int k = 0; k < depth; k++) {
+                if (seen[k] == cur_cdev) { is_loop = 1; break; }
+            }
+            if (is_loop) break;
+            seen[depth++] = cur_cdev;
+
+            /* Читаем si_namebuf (+0xe0) и указатель si_name (+0x88..+0x98) */
+            char dev_name[64] = {0};
+            g_sigsys_fault = 0;
+            if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
+                uint64_t nwords[8] = {0};
+                kekcall(KEKCALL_DUMP_MEM, cur_cdev + 0xe0ULL, (uintptr_t)nwords, 64);
+                memcpy(dev_name, nwords, 63);
+                dev_name[63] = 0;
+            } else {
+                break;
+            }
+            if (g_sigsys_fault) break;
+
+            /* Если в inline пусто, проверим si_name как указатель на +0x88, +0x90, +0x98 */
+            if (!dev_name[0]) {
+                for (uint64_t off = 0x88; off <= 0x98; off += 8) {
+                    uint64_t ptr = 0;
+                    if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
+                        kekcall(KEKCALL_DUMP_MEM, cur_cdev + off, (uintptr_t)&ptr, 8);
+                        if ((ptr & 0xFFFF000000000000ULL) == 0xFFFF000000000000ULL) {
+                            uint64_t sw[4] = {0};
+                            kekcall(KEKCALL_DUMP_MEM, ptr, (uintptr_t)sw, 32);
+                            memcpy(dev_name, sw, 31);
+                            if (dev_name[0] >= 32 && dev_name[0] <= 126) break;
+                            dev_name[0] = 0;
+                        }
+                    }
+                }
+            }
+
+            if (dev_name[0]) {
+                klog_printf("[WALK] csw=0x%llx cdev=0x%llx name='%s'\n",
+                            (unsigned long long)csw, (unsigned long long)cur_cdev, dev_name);
+
+                if (strstr(dev_name, "mp4") || strstr(dev_name, "dump") || strstr(dev_name, "a53")) {
+                    klog_printf("[WALK] ****************************************************\n");
+                    klog_printf("[WALK] *** MATCH FOUND: '%s' @ cdev=0x%llx csw=0x%llx ***\n",
+                                dev_name, (unsigned long long)cur_cdev, (unsigned long long)csw);
+                    klog_printf("[WALK] ****************************************************\n");
+                    found_cdevsw = csw;
+                    found_cdev = cur_cdev;
+                    strncpy(found_name, dev_name, sizeof(found_name) - 1);
+                    break;
+                }
+            }
+
+            /* Следующий cdev в списке (si_list.le_next на +0x60) */
+            uint64_t next_cdev = 0;
+            g_sigsys_fault = 0;
+            if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
+                kekcall(KEKCALL_DUMP_MEM, cur_cdev + 0x60ULL, (uintptr_t)&next_cdev, 8);
+            } else {
+                break;
+            }
+            if (g_sigsys_fault) break;
+            cur_cdev = next_cdev;
+        }
+
+        if (found_cdevsw) break;
+    }
+
+    signal(SIGSYS, SIG_DFL);
+
+    if (found_cdevsw) {
+        klog_printf("[WALK] Patching d_open of cdevsw @ 0x%llx to justreturn (0x%llx)...\n",
+                    (unsigned long long)found_cdevsw, (unsigned long long)justreturn_addr);
+        /* Патчим d_open (+0x10) */
+        kekcall(27 /* WRITE64 */, found_cdevsw + 0x10ULL, justreturn_addr, 0);
+
+        /* Проверяем чтением */
+        uint64_t check_val = 0;
+        kekcall(KEKCALL_DUMP_MEM, found_cdevsw + 0x10ULL, (uintptr_t)&check_val, 8);
+        klog_printf("[WALK] d_open verification: 0x%llx (expected 0x%llx)\n",
+                    (unsigned long long)check_val, (unsigned long long)justreturn_addr);
+
+        /* Проверяем open() */
+        int fd = open("/dev/mp4/dump", 0x0002 /* O_RDWR */);
+        klog_printf("[WALK] open(\"/dev/mp4/dump\", O_RDWR) returned fd = %d\n", fd);
+        if (fd >= 0) {
+            klog_printf("[WALK] SUCCESS! /dev/mp4/dump is OPEN and usable! fd=%d\n", fd);
+            close(fd);
+        } else {
+            klog_printf("[WALK] open returned %d, errno=%d\n", fd, errno);
+        }
+    } else {
+        klog_printf("[WALK] mp4 cdev was not found across scanned cdevsw lists.\n");
     }
 
     return 0;
@@ -565,6 +704,7 @@ probe_mp4_device(uint64_t curproc_hint)
     (void)curproc_hint;
     test_mp4_open_with_root();
     scan_cdevsw();
+    find_and_patch_mp4_cdevsw();
     return 0;
 }
 
