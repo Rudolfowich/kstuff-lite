@@ -121,94 +121,82 @@ step_rodata_hunt(void)
 }
 
 int
-find_mp4_cdevsw_v2(void)
+find_mp4_cdev_in_heap(void)
 {
-    /* [0] Динамический адрес str_mp4_dump для текущей сессии KASLR */
-    uint64_t str_mp4_dump = 0;
+    /* [0] Находим динамический адрес str_mp4_dump для текущей сессии KASLR */
+    uint64_t target = 0;
     static uint64_t g_str[32];
     for (int i = 0; i < 32; i++) g_str[i] = 0;
     kekcall(KEKCALL_SCAN_DMEM, 32, (uintptr_t)g_str, 0);
     for (int i = 0; i < 32; i++) {
         if (g_str[i] && (g_str[i] & 0xff) == 0xaa) {
-            str_mp4_dump = g_str[i];
+            target = g_str[i];
             break;
         }
     }
-    if (!str_mp4_dump) {
-        str_mp4_dump = 0xffffffff90fe38aaULL;
+    if (!target) {
+        target = 0xffffffff90fe38aaULL;
     }
-    klog_printf("[MP4] str_mp4_dump anchor @ 0x%llx\n", (unsigned long long)str_mp4_dump);
+    klog_printf("[HEAP] target str_mp4_dump @ 0x%llx\n", (unsigned long long)target);
 
-    uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+    /* Heap zones из diag: 0xffffd4d7..., 0xffffd4df..., 0xffffdf05... */
+    uint64_t heap_zones[] = {
+        0xffffd4d700000000ULL,
+        0xffffd4df00000000ULL,
+        0xffffdf0500000000ULL,  /* ещё одна куча видна в ext[12] */
+    };
+    const char *zone_name[] = {"HEAP_LOW", "HEAP_MID", "HEAP_HIGH"};
 
-    /* [1] Scan ±4 KB от "mp4/dump" для короткой "mp4\0" */
-    uint64_t found_short[16] = {0};
-    unsigned nfound = 0;
-    uint64_t base = (str_mp4_dump - 4096) & ~7ULL;
-
-    for (int chunk = 0; chunk < 8; chunk++) {
-        uint64_t cs = base + chunk * 1024;
-        uint8_t cbuf[1024];
-        for (int i = 0; i < 1024; i++) cbuf[i] = 0;
-
-        if (kekcall(KEKCALL_DUMP_MEM, cs, (uintptr_t)cbuf, 1024) != 0) continue;
-
-        for (int i = 1; i + 4 < 1024; i++) {
-            /* Паттерн "mp4\0" с null-разделителем перед */
-            if (cbuf[i-1] == 0x00 &&
-                cbuf[i]   == 0x6D && cbuf[i+1] == 0x70 &&
-                cbuf[i+2] == 0x34 && cbuf[i+3] == 0x00)
-            {
-                uint64_t addr = cs + i;
-                klog_printf("[MP4] short str @ 0x%llx\n", (unsigned long long)addr);
-                if (nfound < 16) found_short[nfound++] = addr;
-            }
-        }
-    }
-
-    klog_printf("[MP4] found %u short mp4 strings\n", nfound);
-
-    /* [2] Для каждой найденной "mp4\0" — scan .data для указателей */
-    for (unsigned k = 0; k < nfound; k++) {
-        uint64_t target = found_short[k];
-        klog_printf("[MP4] scan .data for ptr to 0x%llx\n", (unsigned long long)target);
+    for (int zone = 0; zone < 3; zone++) {
+        uint64_t base = heap_zones[zone];
+        klog_printf("[%s] base = 0x%llx\n", zone_name[zone], (unsigned long long)base);
 
         for (int chunk = 0; chunk < 16; chunk++) {
-            uint64_t cs = kbase + chunk * 1024ULL * 1024ULL;
+            uint64_t cs = base + chunk * 1024ULL * 1024ULL;
+
+            /* KEKCALL_SCAN_PTR_CUSTOM: scan_mb=1 на адрес cs (copy_from_kernel внутри проверяет валидность) */
             uint64_t finds[32] = {0};
             long n = kekcall5(KEKCALL_SCAN_PTR_CUSTOM, (uintptr_t)finds, target, 1, cs);
+
             if (n > 0) {
-                klog_printf("[MP4]   chunk %d: %ld ptrs\n", chunk, n);
-                for (int j = 0; j < 16; j++) {
-                    if (finds[j]) {
-                        /* ptr @ X — это поле d_name в struct cdevsw mp4_cdevsw
-                         * В FreeBSD:
-                         * +0x00: d_version (int), d_flags (uint) -> 8 байт
-                         * +0x08: d_name (const char*)
-                         * +0x10: d_open
-                         * cdevsw = finds[j] - 0x08
-                         * d_open = cdevsw + 0x10 = finds[j] + 0x08
-                         */
-                        uint64_t cdevsw_addr = finds[j] - 0x08;
-                        uint64_t d_open_addr = cdevsw_addr + 0x10;
-                        klog_printf("[MP4]     ptr @ 0x%llx (cdevsw ~ 0x%llx, d_open ~ 0x%llx)\n",
-                                    (unsigned long long)finds[j],
-                                    (unsigned long long)cdevsw_addr,
-                                    (unsigned long long)d_open_addr);
+                klog_printf("[%s]   chunk %d @ 0x%llx: %ld ptrs\n",
+                            zone_name[zone], chunk,
+                            (unsigned long long)cs, n);
+                for (int i = 0; i < 16; i++) {
+                    if (finds[i]) {
+                        uint64_t ptr_addr = finds[i];
+                        klog_printf("[%s]     ptr @ 0x%llx (likely struct cdev)\n",
+                                    zone_name[zone], (unsigned long long)ptr_addr);
+
+                        /* Dump 256 bytes структуры вокруг найденного указателя */
+                        uint64_t cdev_start = (ptr_addr - 0x98) & ~7ULL;  /* si_name offset ~0x98 в struct cdev */
+                        uint8_t cbuf[256];
+                        for (int b = 0; b < 256; b++) cbuf[b] = 0;
+                        if (kekcall(KEKCALL_DUMP_MEM, cdev_start, (uintptr_t)cbuf, 256) == 0) {
+                            klog_printf("[%s]     struct cdev @ 0x%llx:\n",
+                                        zone_name[zone], (unsigned long long)cdev_start);
+                            for (int b = 0; b < 256; b += 16) {
+                                klog_printf("[%s]       +0x%03x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                    zone_name[zone], b,
+                                    cbuf[b], cbuf[b+1], cbuf[b+2], cbuf[b+3],
+                                    cbuf[b+4], cbuf[b+5], cbuf[b+6], cbuf[b+7],
+                                    cbuf[b+8], cbuf[b+9], cbuf[b+10], cbuf[b+11],
+                                    cbuf[b+12], cbuf[b+13], cbuf[b+14], cbuf[b+15]);
+                            }
+                        }
                     }
                 }
             }
-            sleep(1);
+            sleep(1);  /* heartbeat */
         }
     }
-
     return 0;
 }
 
 int
 probe_mp4_device(void)
 {
-    find_mp4_cdevsw_v2();
+    find_mp4_cdev_in_heap();
     return 0;
 }
 
