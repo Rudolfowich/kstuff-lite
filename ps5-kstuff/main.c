@@ -1429,6 +1429,7 @@ int main(void* ds, int a, int b, uintptr_t c, uintptr_t d)
     const char* symbols[] = {
         "comparison_table"+zero,
         "dmem"+zero,
+        "kdata_base"+zero,
         "int1_handler"+zero,
         "int3_handler"+zero,
         "int13_handler"+zero,
@@ -1454,6 +1455,7 @@ int main(void* ds, int a, int b, uintptr_t c, uintptr_t d)
     uint64_t values[] = {
         comparison_table,      // comparison_table
         dmem_virt_base,        // dmem
+        kdata_base,            // kdata_base
         int1_handler,          // int1_handler
         int3_handler,          // int3_handler
         int13_handler,         // int13_handler
