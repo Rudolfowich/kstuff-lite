@@ -68,8 +68,6 @@ probe_mp4_device(void)
     for (int i = 0; i < 192; i++) ext_buf[i] = 0;
     kekcall(KEKCALL_EXT_DUMP, 0, (uintptr_t)ext_buf, sizeof(ext_buf));
     uint64_t proc_va = ext_buf[2];
-    uint64_t ucred_va = ext_buf[3];
-    uint64_t fd_va = ext_buf[47];
     uint64_t arena_base = proc_va & ~0xFFFFFFFFULL;
 
     /* ===== APPROACH 3: Heap scan для inline cdev (как в "jackpot" boot) ===== 
