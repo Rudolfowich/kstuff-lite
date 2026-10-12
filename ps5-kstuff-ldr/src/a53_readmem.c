@@ -61,68 +61,77 @@ a53_find_profile(uint32_t fw, uint32_t cond)
 
 
 int
-probe_mp4_device(void)
+dump_mp4_candidate(uint64_t cand)
 {
-    /* 1. Найти str_addr */
-    uint64_t str_addr = 0;
-    static uint64_t g_str[32];
-    for (int i = 0; i < 32; i++) g_str[i] = 0;
-    kekcall(KEKCALL_SCAN_DMEM, 32, (uintptr_t)g_str, 0);
-    for (int i = 0; i < 32; i++) {
-        if (g_str[i] && (g_str[i] & 0xff) == 0xaa) {
-            str_addr = g_str[i];
-            break;
-        }
-    }
-    if (!str_addr) {
-        klog_puts("[a53] can't find str_addr\n");
+    uint64_t base = (cand - 256) & ~7ULL;
+    static uint64_t qwords[64];
+    for (int i = 0; i < 64; i++) qwords[i] = 0;
+
+    long r = kekcall(KEKCALL_DUMP_MEM, base, (uintptr_t)qwords, 0);
+    if (r <= 0) {
+        klog_printf("[a53] dump failed: ret=%ld\n", r);
         return -1;
     }
-    klog_printf("[a53] str_addr = 0x%llx\n", (unsigned long long)str_addr);
 
-    /* ===== APPROACH 1 EXTENDED: ptr scan .data 64 MB вперёд от kdata_base ===== */
-    klog_puts("[a53] APPROACH 1 EXTENDED: ptr scan .data forward 64MB\n");
-    static uint64_t g_p[32];
-    for (int i = 0; i < 32; i++) g_p[i] = 0;
-    long np = kekcall(KEKCALL_SCAN_PTR, (uintptr_t)g_p, str_addr, 64);
-    klog_printf("[a53] ptr scan 64MB: total=%ld\n", np);
-    for (int i = 0; i < 32; i++) {
-        if (g_p[i]) klog_printf("[a53]   ptr[%d] = 0x%016llx\n", i, (unsigned long long)g_p[i]);
+    uint8_t *buf = (uint8_t*)qwords;
+    klog_printf("[a53] === dump of cand 0x%llx (base 0x%llx, ±256) ===\n",
+                (unsigned long long)cand, (unsigned long long)base);
+    for (int i = 0; i < 512; i += 16) {
+        klog_printf("[a53] +0x%03x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            i,
+            buf[i], buf[i+1], buf[i+2], buf[i+3], buf[i+4], buf[i+5], buf[i+6], buf[i+7],
+            buf[i+8], buf[i+9], buf[i+10], buf[i+11], buf[i+12], buf[i+13], buf[i+14], buf[i+15]);
     }
-    if (np > 0) return 0;
+    return 0;
+}
 
-    /* ===== APPROACH 6: ptr scan .data НАЗАД от kdata_base 32 MB ===== */
-    klog_puts("[a53] APPROACH 6: ptr scan .data BACKWARD 32MB\n");
-    int64_t offset_back = -(32LL * 1024 * 1024);
-    for (int i = 0; i < 32; i++) g_p[i] = 0;
-    long np_back = kekcall5(KEKCALL_SCAN_PTR_CUSTOM, (uintptr_t)g_p, str_addr, 32, (uint64_t)offset_back);
-    klog_printf("[a53] ptr scan 32MB backward: total=%ld\n", np_back);
-    for (int i = 0; i < 32; i++) {
-        if (g_p[i]) klog_printf("[a53]   ptr_back[%d] = 0x%016llx\n", i, (unsigned long long)g_p[i]);
-    }
-    if (np_back > 0) return 0;
+int
+dump_ioctl_handlers(void)
+{
+    uint64_t handlers[4] = {
+        0xffffffff9033eac9ULL,
+        0xffffffff90387a0cULL,
+        0xffffffff90392147ULL,
+        0xffffffff9033ead6ULL,
+    };
+    for (int h = 0; h < 4; h++) {
+        uint64_t base = (handlers[h] - 128) & ~7ULL;
+        static uint64_t qwords[64];
+        for (int i = 0; i < 64; i++) qwords[i] = 0;
 
-    /* ===== APPROACH 5: xref НАЗАД (первые 10 chunks x 1MB для безопасности) ===== */
-    klog_puts("[a53] APPROACH 5: xref backward 10 chunks\n");
-    for (int chunk = 1; chunk <= 10; chunk++) {
-        static uint64_t g_xref[32];
-        for (int i = 0; i < 32; i++) g_xref[i] = 0;
-        uint64_t cs = str_addr - (uint64_t)chunk * 1024ULL * 1024ULL;
-        long n = kekcall(KEKCALL_SCAN_XREF_V2, str_addr, (uintptr_t)g_xref, cs);
-        klog_printf("[a53] back chunk %d (start=0x%llx) ret=%ld\n",
-                    chunk, (unsigned long long)cs, n);
-        if (n > 0) {
-            klog_printf("[a53] FOUND! chunk -%d start=0x%llx total=%ld\n",
-                        chunk, (unsigned long long)cs, n);
-            for (int i = 0; i < 32; i++) {
-                if (g_xref[i]) klog_printf("[a53]   x[%d] = 0x%016llx\n", i, g_xref[i]);
-            }
-            return 0;
+        if (kekcall(KEKCALL_DUMP_MEM, base, (uintptr_t)qwords, 0) <= 0) continue;
+        uint8_t *buf = (uint8_t*)qwords;
+
+        klog_printf("[a53] === handler[%d] = 0x%llx (base 0x%llx) ===\n",
+                    h, (unsigned long long)handlers[h], (unsigned long long)base);
+        for (int i = 0; i < 256; i += 16) {
+            klog_printf("[a53] +0x%03x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                i,
+                buf[i], buf[i+1], buf[i+2], buf[i+3], buf[i+4], buf[i+5], buf[i+6], buf[i+7],
+                buf[i+8], buf[i+9], buf[i+10], buf[i+11], buf[i+12], buf[i+13], buf[i+14], buf[i+15]);
         }
     }
+    return 0;
+}
 
-    klog_puts("[a53] all approaches finished: 0 найдено\n");
-    return -1;
+int
+probe_mp4_device(void)
+{
+    /* Получаем ext_buf для динамических адресов */
+    static uint64_t ext_buf[192];
+    for (int i = 0; i < 192; i++) ext_buf[i] = 0;
+    kekcall(KEKCALL_EXT_DUMP, 0, (uintptr_t)ext_buf, sizeof(ext_buf));
+
+    uint64_t cand_ext42 = ext_buf[42] ? ext_buf[42] : 0xffffffff90316611ULL;
+    klog_printf("[a53] cand ext[42] = 0x%llx\n", (unsigned long long)cand_ext42);
+
+    /* 1. Дамп вокруг ext[42] */
+    dump_mp4_candidate(cand_ext42);
+
+    /* 2. Дамп 4-х ioctl handlers */
+    dump_ioctl_handlers();
+
+    return 0;
 }
 
 /* ---- Main install entry --------------------------------------------- */
