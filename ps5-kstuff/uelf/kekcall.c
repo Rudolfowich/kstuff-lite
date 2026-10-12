@@ -447,8 +447,8 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         uint64_t kbase = (start_abs > 0xfffffc0000000000ULL) ? start_abs : ((uint64_t)kdata_base + start_abs);
         uint64_t scan_bytes = scan_mb * 1024ULL * 1024ULL;
 
-        /* Pattern: "mp4/dump" little-endian u64 */
-        const uint64_t needle = 0x706d75642f34706dULL;
+        /* Pattern: custom needle from args[R8] or default "mp4/dump" */
+        const uint64_t needle = args[R8] ? args[R8] : 0x706d75642f34706dULL;
 
         uint64_t finds[32] = {0};
         unsigned nfound = 0;
