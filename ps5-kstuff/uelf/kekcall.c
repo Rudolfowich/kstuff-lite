@@ -99,6 +99,48 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
             args[RAX] = result;
         return err;
     }
+    else if(nr == 8)
+    {
+        /* A53 diagnostic: dump curthread + curproc raw bytes.
+         * Пишем через log_word в shared ring buffer. Безопасно: только чтение. */
+        uint64_t td = regs[RDI];
+        uint64_t proc = 0;
+
+        /* Маркер начала */
+        log_word(0xDEADBEEF00000008ULL);
+        log_word(td);                       /* curthread VA */
+
+        /* Dump 0x200 байт struct thread */
+        log_word(0x7468726561643030ULL);    /* "thread00" */
+        for (uint64_t off = 0; off < 0x200; off += 8) {
+            uint64_t val = 0;
+            kpeek64_checked(td + off, &val);
+            log_word(val);
+        }
+
+        /* Берём td_proc = td+8, логируем pid для sanity */
+        kpeek64_checked(td + 8, &proc);
+        log_word(0x70726f635f707472ULL);    /* "proc_ptr" */
+        log_word(proc);
+
+        uint64_t pid = 0;
+        kpeek64_checked(proc + 0xbc, &pid);
+        log_word(0x7069645f76616c75ULL);    /* "pid_valu" */
+        log_word(pid & 0xFFFFFFFF);
+
+        /* Dump 0x200 байт struct proc */
+        log_word(0x70726f6330303030ULL);    /* "proc0000" */
+        for (uint64_t off = 0; off < 0x200; off += 8) {
+            uint64_t val = 0;
+            kpeek64_checked(proc + off, &val);
+            log_word(val);
+        }
+
+        /* Маркер конца */
+        log_word(0xDEADBEEF00000080ULL);
+        args[RAX] = 0;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;

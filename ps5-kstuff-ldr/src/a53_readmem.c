@@ -32,6 +32,7 @@
 #include <ps5/klog.h>
 
 #include "a53_readmem.h"
+#include "kekcall.h"
 
 #define MP4_DEV_PATH    "/dev/mp4/dump"
 
@@ -97,6 +98,12 @@ install_ppr_a53(uint32_t system_fw_version)
     uint32_t profile_fw;
     memcpy(&profile_fw, profile, 4);
     klog_printf("[a53] profile found: profile_fw=0x%08x\n", profile_fw);
+
+    /* Запрашиваем kernel diagnostic dump — безопасно, только чтение */
+    klog_puts("[a53] requesting UELF diagnostic dump (kekcall 8) ...\n");
+    long dump_ret = kekcall(KEKCALL_A53_DUMP, 0, 0, 0);
+    klog_printf("[a53] kekcall(8) returned=%ld — dump is in shared ring buffer\n",
+                dump_ret);
 
     /* Device probe */
     if (probe_mp4_device() != 0) {
