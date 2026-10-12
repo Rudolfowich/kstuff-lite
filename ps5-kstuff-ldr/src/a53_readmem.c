@@ -726,13 +726,13 @@ find_and_patch_mp4_cdevsw(void)
             close(cfd);
         }
 
-        /* 3. Запись d_open через KEKCALL_WRITE64 (kekcall 27) */
-        uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
-        uint64_t justreturn_addr = kbase - 0xA686F0ULL;
-        klog_printf("[PATCH] writing d_open via KEKCALL_WRITE64(27) to csw+0x10 (0x%llx) val=0x%llx...\n",
-                    (unsigned long long)(mp4_parent_csw + 0x10ULL), (unsigned long long)justreturn_addr);
+        /* 3. Запись d_open через KEKCALL_WRITE64 (kekcall 27) на адрес d_close (+0x20) */
+        uint64_t mp4_d_close_func = 0;
+        __builtin_memcpy(&mp4_d_close_func, mp4_csw_buf + 0x20, 8);
+        klog_printf("[PATCH] writing d_open via KEKCALL_WRITE64(27) to csw+0x10 (0x%llx) val=d_close (0x%llx)...\n",
+                    (unsigned long long)(mp4_parent_csw + 0x10ULL), (unsigned long long)mp4_d_close_func);
 
-        long wr_ret = kekcall(27, mp4_parent_csw + 0x10ULL, justreturn_addr, 0);
+        long wr_ret = kekcall(27, mp4_parent_csw + 0x10ULL, mp4_d_close_func, 0);
         klog_printf("[PATCH] KEKCALL_WRITE64 returned %ld\n", wr_ret);
 
         /* Проверяем, изменился ли d_open */
@@ -740,12 +740,13 @@ find_and_patch_mp4_cdevsw(void)
         kekcall(KEKCALL_DUMP_MEM, mp4_parent_csw + 0x10ULL, (uintptr_t)&readback, 8);
         klog_printf("[PATCH] d_open readback = 0x%llx (orig 0x%llx, expected 0x%llx)\n",
                     (unsigned long long)readback, (unsigned long long)mp4_d_open_func,
-                    (unsigned long long)justreturn_addr);
+                    (unsigned long long)mp4_d_close_func);
 
-        if (readback == justreturn_addr) {
-            klog_printf("[PATCH] *** BINGO! d_open PATCHED TO justreturn! ***\n");
+        if (readback == mp4_d_close_func) {
+            klog_printf("[PATCH] *** BINGO! d_open PATCHED TO d_close! Calling open now... ***\n");
             int pfd = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
-            klog_printf("[PATCH] post-patch open result: fd=%d errno=%d\n", pfd, errno);
+            int perr = errno;
+            klog_printf("[PATCH] post-patch open result: fd=%d errno=%d\n", pfd, perr);
             if (pfd >= 0) {
                 klog_printf("[PATCH] *** SUCCESS! /dev/mp4/dump_for_decid OPENED! fd=%d ***\n", pfd);
                 close(pfd);
