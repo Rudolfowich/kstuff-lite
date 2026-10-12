@@ -601,86 +601,51 @@ probe_opened_mp4_fd(int fd, const char *name)
         }
     }
 
-    /* 1. Тест magic numbers */
-    uint32_t magics[] = {
-        0x44454349,  /* "DECI" */
-        0x49434544,  /* "ICED" */
-        0xDEC1DEC1,
-        0xDECAFBAD,
-        0xCAFEBABE,
-        0x00000001,
-        0x00000100,
-        0x00010000,
-    };
-    int nmagics = sizeof(magics)/sizeof(magics[0]);
+    /* 1. Точное воспроизведение cmd=15 на /dev/deci_coredump */
+    uint32_t req15[4] = {0x44454349 /* 'DECI' */, 15, 0, 0};
+    ssize_t nw15 = write(fd, req15, 16);
+    uint8_t buf15[512] = {0};
+    ssize_t nr15 = read(fd, buf15, sizeof(buf15));
+    uint32_t st15 = *(uint32_t*)buf15;
+    uint32_t len15 = *(uint32_t*)(buf15 + 4);
 
-    for (int i = 0; i < nmagics; i++) {
-        uint8_t req[16] = {0};
-        *(uint32_t*)req = magics[i];
-        *(uint32_t*)(req + 4) = 0;  /* cmd = 0 */
+    klog_printf("[CMD15_TARGET] %s: write(DECI, 15)=%zd read nr=%zd status=0x%08x len=0x%08x\n",
+                name, nw15, nr15, st15, len15);
 
-        write(fd, req, 16);
-        uint8_t rbuf[256] = {0};
-        ssize_t nr = read(fd, rbuf, 256);
+    if (nr15 > 0) {
+        klog_printf("[CMD15_FULL] === FULL %zd BYTES FOR CMD 15 on %s ===\n", nr15, name);
+        for (ssize_t r = 0; r < nr15; r += 16) {
+            klog_printf("[CMD15_FULL] +0x%02zx: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                        r,
+                        buf15[r+0], buf15[r+1], buf15[r+2], buf15[r+3],
+                        buf15[r+4], buf15[r+5], buf15[r+6], buf15[r+7],
+                        buf15[r+8], buf15[r+9], buf15[r+10], buf15[r+11],
+                        buf15[r+12], buf15[r+13], buf15[r+14], buf15[r+15]);
+        }
+    }
+
+    /* 2. Свип команд 0..255 с префиксом 'DECI' — логируем ТОЛЬКО не-шум (status != 0xe0 || len != 0x62) */
+    klog_printf("[CMD_SWEEP] sweeping cmds 0..255 on %s with 'DECI' magic (filtering audit log noise)...\n", name);
+    for (uint32_t c = 0; c < 256; c++) {
+        uint32_t req_c[4] = {0x44454349 /* 'DECI' */, c, 0, 0};
+        write(fd, req_c, 16);
+        uint8_t rbuf[512] = {0};
+        ssize_t nr = read(fd, rbuf, sizeof(rbuf));
         uint32_t status = *(uint32_t*)rbuf;
         uint32_t rlen = *(uint32_t*)(rbuf + 4);
 
-        klog_printf("[DECI_MAGIC] magic=0x%08x -> nr=%ld status=0x%08x len=0x%08x\n",
-                    magics[i], (long)nr, status, rlen);
-
-        if (status != 0xFFFFFFFC && nr > 0) {
-            klog_printf("[DECI_MAGIC] *** BINGO! Status changed! Magic 0x%08x recognized! ***\n", magics[i]);
-            for (int r = 0; r < 32 && r < nr; r += 16) {
-                klog_printf("[DECI_MAGIC_DATA] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                            r, rbuf[r+0], rbuf[r+1], rbuf[r+2], rbuf[r+3],
-                            rbuf[r+4], rbuf[r+5], rbuf[r+6], rbuf[r+7]);
+        if (status != 0x000000e0 || rlen != 0x00000062) {
+            klog_printf("[CMD_DISPATCH] *** %s cmd=%u RECOGNIZED! nr=%zd status=0x%08x len=0x%08x ***\n",
+                        name, c, nr, status, rlen);
+            if (nr > 0) {
+                for (ssize_t r = 0; r < 64 && r < nr; r += 16) {
+                    klog_printf("[CMD_DISPATCH_DATA] +0x%02zx: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                r, rbuf[r+0], rbuf[r+1], rbuf[r+2], rbuf[r+3],
+                                rbuf[r+4], rbuf[r+5], rbuf[r+6], rbuf[r+7]);
+                }
             }
         }
     }
-
-    /* 2. Тест разных размеров заголовка запроса: 4, 8, 12, 16, 24, 32, 64 */
-    size_t header_sizes[] = {4, 8, 12, 16, 24, 32, 64};
-    int nhsizes = sizeof(header_sizes)/sizeof(header_sizes[0]);
-
-    for (int h = 0; h < nhsizes; h++) {
-        uint8_t req_h[64] = {0};
-        /* cmd = 1 */
-        *(uint32_t*)req_h = 1;
-        write(fd, req_h, header_sizes[h]);
-        uint8_t rbuf[256] = {0};
-        ssize_t nr = read(fd, rbuf, 256);
-        uint32_t status = *(uint32_t*)rbuf;
-        uint32_t rlen = *(uint32_t*)(rbuf + 4);
-        klog_printf("[DECI_LEN] write_sz=%zu (cmd=1) -> nr=%ld status=0x%08x len=0x%08x\n",
-                    header_sizes[h], (long)nr, status, rlen);
-    }
-
-    /* 3. Тест команд 0..15 с длиной 8 байт */
-    for (uint32_t c = 0; c < 16; c++) {
-        uint32_t req_c[2] = {c, 0};
-        write(fd, req_c, 8);
-        uint8_t rbuf[256] = {0};
-        ssize_t nr = read(fd, rbuf, 256);
-        uint32_t status = *(uint32_t*)rbuf;
-        if (status != 0xFFFFFFFC) {
-            klog_printf("[DECI_CMD] cmd=%u -> status=0x%08x len=0x%08x nr=%ld\n",
-                        c, status, *(uint32_t*)(rbuf + 4), (long)nr);
-        }
-    }
-
-    /* 4. Тест команд 0..15 с длиной 16 байт */
-    for (uint32_t c = 0; c < 16; c++) {
-        uint32_t req_c[4] = {0x44454349 /* DECI */, c, 0, 0};
-        write(fd, req_c, 16);
-        uint8_t rbuf[256] = {0};
-        ssize_t nr = read(fd, rbuf, 256);
-        uint32_t status = *(uint32_t*)rbuf;
-        if (status != 0xFFFFFFFC) {
-            klog_printf("[DECI_CMD_DECI] cmd=%u -> status=0x%08x len=0x%08x nr=%ld\n",
-                        c, status, *(uint32_t*)(rbuf + 4), (long)nr);
-        }
-    }
-
 }
 
 /* Полноценный полный обход d_devs для каждого найденного cdevsw БЕЗ прерываний */
