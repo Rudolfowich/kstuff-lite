@@ -488,6 +488,21 @@ scan_cdevsw(void)
 
     klog_printf("[CDVS] safe scan completed. Found %d cdevsw total.\n", total_cdevsw);
 
+    /* Диагностический дамп 192 байт известного cdevsw: icc_configuration */
+    klog_printf("[ICC] dumping 192 bytes of icc_configuration cdevsw @ 0xffffffffcd71fb78:\n");
+    uint8_t icc_buf[192] = {0};
+    g_sigsys_fault = 0;
+    if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
+        kekcall(KEKCALL_DUMP_MEM, 0xffffffffcd71fb78ULL, (uintptr_t)icc_buf, 192);
+        for (int off = 0; off < 192; off += 8) {
+            uint64_t v = 0;
+            __builtin_memcpy(&v, icc_buf + off, 8);
+            klog_printf("[ICC] +0x%02x = 0x%016llx\n", off, (unsigned long long)v);
+        }
+    } else {
+        klog_printf("[ICC] failed to dump icc_configuration\n");
+    }
+
     /* Восстанавливаем дефолтный обработчик SIGSYS */
     signal(SIGSYS, SIG_DFL);
 
