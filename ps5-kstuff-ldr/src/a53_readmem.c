@@ -121,66 +121,91 @@ step_rodata_hunt(void)
 }
 
 int
-dump_text_page_level(void)
+find_mp4_cdevsw(void)
 {
-    FILE *f = fopen("/data/kernel_text.bin", "wb");
-    if (!f) {
-        klog_perror("[DUMP] fopen /data/kernel_text.bin failed");
-        return -1;
-    }
-
     uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+
     /* krodata = kbase
-     * ktext = kbase - 0xCC0000 (~12.75 MB) */
-    uint64_t text_end   = kbase;
-    uint64_t text_start = kbase - 0xCC0000ULL;
+     * kdata = kbase + 0xD9D000 (~13.6 MB .rodata) */
+    uint64_t rodata_start = kbase;
+    uint64_t rodata_size  = 14ULL * 1024ULL * 1024ULL;  /* 14 MB .rodata */
+    uint64_t data_start   = kbase + 0xD9D000ULL;
 
-    klog_printf("[DUMP] starting text dump: 0x%llx .. 0x%llx (12.75 MB)\n",
-                (unsigned long long)text_start, (unsigned long long)text_end);
+    klog_printf("[CDEV] scanning .rodata 0x%llx..0x%llx (14 MB) for 'mp4\\0'\n",
+                (unsigned long long)rodata_start,
+                (unsigned long long)(rodata_start + rodata_size));
 
-    uint8_t buf[4096];
-    uint64_t total = 0, ok = 0, skip = 0;
+    uint64_t mp4_strings[16] = {0};
+    unsigned n_strings = 0;
 
-    for (uint64_t addr = text_start; addr < text_end; addr += 4096) {
-        /* SAFE PROBE каждую страницу */
-        uint64_t probe = 0;
-        if (kekcall(KEKCALL_SAFE_PEEK, addr, (uintptr_t)&probe, 0) != 0) {
-            uint8_t zero[4096] = {0};
-            fwrite(zero, 1, 4096, f);
-            skip++;
-        } else {
-            for (int i = 0; i < 4096; i++) buf[i] = 0;
-            if (kekcall(KEKCALL_DUMP_MEM, addr, (uintptr_t)buf, 4096) == 0) {
-                fwrite(buf, 1, 4096, f);
-                ok++;
-            } else {
-                uint8_t zero[4096] = {0};
-                fwrite(zero, 1, 4096, f);
-                skip++;
+    for (uint64_t off = 0; off < rodata_size; off += 4096) {
+        uint8_t buf[4096];
+        for (int i = 0; i < 4096; i++) buf[i] = 0;
+        if (kekcall(KEKCALL_DUMP_MEM, rodata_start + off, (uintptr_t)buf, 4096) != 0)
+            continue;
+
+        for (int i = 1; i + 4 < 4096; i++) {
+            /* "mp4\0" с null перед */
+            if (buf[i-1] == 0x00 &&
+                buf[i]   == 0x6D && buf[i+1] == 0x70 &&
+                buf[i+2] == 0x34 && buf[i+3] == 0x00)
+            {
+                uint64_t addr = rodata_start + off + i;
+                klog_printf("[CDEV] 'mp4' @ 0x%llx\n", (unsigned long long)addr);
+                if (n_strings < 16) mp4_strings[n_strings++] = addr;
             }
         }
-        total++;
-
-        /* Прогресс каждый MB */
-        if ((total * 4096 % (1024 * 1024)) == 0) {
-            klog_printf("[DUMP] %llu MB (ok=%llu, skip=%llu)\n",
-                        (total * 4096) / (1024 * 1024),
-                        (unsigned long long)ok,
-                        (unsigned long long)skip);
-            usleep(50000);  /* 50 мс */
-        }
     }
 
-    fclose(f);
-    klog_printf("[DUMP] done: /data/kernel_text.bin, %llu pages ok, %llu skip\n",
-                (unsigned long long)ok, (unsigned long long)skip);
+    klog_printf("[CDEV] found %u 'mp4' strings in .rodata\n", n_strings);
+
+    /* Шаг 2: для каждой найденной строки — scan .data */
+    for (unsigned k = 0; k < n_strings; k++) {
+        klog_printf("[CDEV] scan .data for ptr to 0x%llx\n",
+                    (unsigned long long)mp4_strings[k]);
+
+        for (int chunk = 0; chunk < 24; chunk++) {
+            uint64_t cs = data_start + chunk * 1024ULL * 1024ULL;
+            uint64_t finds[16] = {0};
+            long n = kekcall5(KEKCALL_SCAN_PTR_CUSTOM, (uintptr_t)finds, mp4_strings[k], 1, cs);
+            if (n > 0) {
+                klog_printf("[CDEV] chunk %d: %ld ptrs\n", chunk, n);
+                for (int i = 0; i < 16; i++) {
+                    if (finds[i]) {
+                        /* finds[i] = адрес поля cdevsw.d_name */
+                        /* d_name на offset +0x08 от начала cdevsw */
+                        uint64_t cdevsw_addr = finds[i] - 0x08;
+                        uint64_t d_open_addr = cdevsw_addr + 0x10;
+                        klog_printf("[CDEV]   d_name_ptr @ 0x%llx (cdevsw @ 0x%llx, d_open at 0x%llx)\n",
+                                    (unsigned long long)finds[i],
+                                    (unsigned long long)cdevsw_addr,
+                                    (unsigned long long)d_open_addr);
+
+                        /* Dump полной cdevsw для верификации */
+                        uint8_t cbuf[128];
+                        if (kekcall(KEKCALL_DUMP_MEM, cdevsw_addr, (uintptr_t)cbuf, 128) == 0) {
+                            klog_printf("[CDEV]   cdevsw dump:\n");
+                            for (int b = 0; b < 128; b += 16) {
+                                klog_printf("[CDEV]     +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                    b, cbuf[b], cbuf[b+1], cbuf[b+2], cbuf[b+3],
+                                    cbuf[b+4], cbuf[b+5], cbuf[b+6], cbuf[b+7],
+                                    cbuf[b+8], cbuf[b+9], cbuf[b+10], cbuf[b+11],
+                                    cbuf[b+12], cbuf[b+13], cbuf[b+14], cbuf[b+15]);
+                            }
+                        }
+                    }
+                }
+            }
+            sleep(1);
+        }
+    }
     return 0;
 }
 
 int
 probe_mp4_device(void)
 {
-    dump_text_page_level();
+    find_mp4_cdevsw();
     return 0;
 }
 
