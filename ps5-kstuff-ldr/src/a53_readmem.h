@@ -38,4 +38,4 @@ int install_ppr_a53(uint32_t system_fw_version);
 /* Diagnostic — minimal check that /dev/mp4/dump exists and opens. Does NOT
  * send any A53 commands. Call this first on an unknown firmware to confirm
  * MP4 driver is present. */
-int probe_mp4_device(void);
+int probe_mp4_device(uint64_t curproc_hint);
