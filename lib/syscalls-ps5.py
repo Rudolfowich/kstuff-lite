@@ -16,18 +16,27 @@ def get_freebsd_syscalls():
 
 def get_sony_syscalls():
     # TODO: PS5-specific syscalls
-    r = urllib.request.urlopen('http://web.archive.org/web/20210124215126js_/https://psdevwiki.com/ps4/edit/Syscalls')
-    data = html.unescape(r.read().decode('latin-1').split('<textarea ', 1)[1].split('</textarea>', 1)[0])
-    ans = {}
-    for i in data.split('\n'):
-        if i.startswith('| '):
-            try:
-                syscno, fw, syscname, proto, notes = i[2:].split(' || ')
-                syscno = int(syscno)
-            except ValueError: continue
-            if syscname.startswith('sys_'):
-                ans[syscno] = syscname[4:]
-    return ans
+    try:
+        req = urllib.request.Request(
+            'http://web.archive.org/web/20210124215126js_/https://psdevwiki.com/ps4/edit/Syscalls',
+            headers={'User-Agent': 'Mozilla/5.0'}
+        )
+        r = urllib.request.urlopen(req, timeout=5)
+        data = html.unescape(r.read().decode('latin-1').split('<textarea ', 1)[1].split('</textarea>', 1)[0])
+        ans = {}
+        for i in data.split('\n'):
+            if i.startswith('| '):
+                try:
+                    syscno, fw, syscname, proto, notes = i[2:].split(' || ')
+                    syscno = int(syscno)
+                except ValueError: continue
+                if syscname.startswith('sys_'):
+                    ans[syscno] = syscname[4:]
+        return ans
+    except Exception as e:
+        import sys
+        sys.stderr.write(f"Warning: failed to fetch psdevwiki syscalls ({e}), continuing with base syscalls\n")
+        return {}
 
 def get_syscalls():
     ans = {}
