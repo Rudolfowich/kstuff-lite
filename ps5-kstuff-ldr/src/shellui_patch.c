@@ -54,7 +54,7 @@ static unsigned long vmspace_pmap(unsigned long vmspace_kaddr) {
     }
 }
 
-static unsigned long kernel_get_proc_cr3(int pid, unsigned long *optional_out_kernel_dmap_base) {
+unsigned long kernel_get_proc_cr3(int pid, unsigned long *optional_out_kernel_dmap_base) {
     unsigned long proc = kernel_get_proc(pid);
     if (proc == 0) {
         return 0;
@@ -84,7 +84,7 @@ static unsigned long kernel_get_proc_cr3(int pid, unsigned long *optional_out_ke
 }
 
 // from ps5-kstuff/main.c
-static uint64_t virt2phys(uintptr_t addr, uint64_t *phys_limit, uint64_t dmap, uint64_t pml) {
+uint64_t virt2phys(uintptr_t addr, uint64_t *phys_limit, uint64_t dmap, uint64_t pml) {
     pml &= PG_FRAME;
 
     for (int i = 39; i >= 12; i -= 9) {

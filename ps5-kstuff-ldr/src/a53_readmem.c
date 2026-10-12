@@ -39,6 +39,9 @@
 #include "a53_readmem.h"
 #include "kekcall.h"
 
+extern unsigned long kernel_get_proc_cr3(int pid, unsigned long *optional_out_kernel_dmap_base);
+extern uint64_t virt2phys(uintptr_t addr, uint64_t *phys_limit, uint64_t dmap, uint64_t pml);
+
 #define MP4_DEV_PATH    "/dev/mp4/dump"
 
 /* ---- Profile lookup -------------------------------------------------- */
@@ -849,6 +852,67 @@ find_and_patch_mp4_cdevsw(void)
     if (!null_dopen) {
         klog_printf("[STEP3] ERROR: null_dopen is NULL!\n");
         return -1;
+    }
+
+    /* Шаг 3.1: DMAP Sanity-Check и чтение 128 байт mp4_cdev_open */
+    unsigned long dmap_base = 0;
+    unsigned long cr3 = kernel_get_proc_cr3(-1, &dmap_base);
+    klog_printf("[DMAP] cr3=0x%lx dmap_base=0x%lx\n", cr3, dmap_base);
+
+    uint64_t null_dname_ptr = 0;
+    kekcall(KEKCALL_DUMP_MEM, null_parent_csw + 0x08ULL, (uintptr_t)&null_dname_ptr, 8);
+    klog_printf("[DMAP] null_csw.d_name ptr = 0x%llx\n", (unsigned long long)null_dname_ptr);
+
+    if (dmap_base && cr3 && null_dname_ptr) {
+        uint64_t phys_end = 0;
+        uint64_t phys_rodata = virt2phys(null_dname_ptr, &phys_end, dmap_base, cr3);
+        klog_printf("[DMAP_SANITY] null_dname_ptr=0x%llx -> phys=0x%llx\n",
+                    (unsigned long long)null_dname_ptr, (unsigned long long)phys_rodata);
+        if (phys_rodata != (uint64_t)-1) {
+            uint64_t dmap_alias_rodata = dmap_base + phys_rodata;
+            char rodata_buf[16] = {0};
+            kekcall(KEKCALL_DUMP_MEM, dmap_alias_rodata, (uintptr_t)rodata_buf, 16);
+            klog_printf("[DMAP_SANITY] rodata via DMAP alias (0x%llx): '%s'\n",
+                        (unsigned long long)dmap_alias_rodata, rodata_buf);
+
+            if (strcmp(rodata_buf, "null") == 0) {
+                klog_printf("[DMAP_SANITY] *** BINGO! DMAP translation VERIFIED! ***\n");
+
+                /* Извлекаем адрес оригинального mp4 d_open: d_close - 8 */
+                uint64_t mp4_csw0 = mp4_parent_csws[0];
+                for (int m = 0; m < mp4_count; m++) {
+                    if (strstr(mp4_names[m], "dump")) mp4_csw0 = mp4_parent_csws[m];
+                }
+                uint64_t mp4_dclose = 0;
+                kekcall(KEKCALL_DUMP_MEM, mp4_csw0 + 0x20ULL, (uintptr_t)&mp4_dclose, 8);
+                uint64_t orig_mp4_dopen = mp4_dclose - 8;
+                klog_printf("[DMAP_TEXT] mp4_dclose=0x%llx -> orig_mp4_dopen=0x%llx\n",
+                            (unsigned long long)mp4_dclose, (unsigned long long)orig_mp4_dopen);
+
+                uint64_t phys_text = virt2phys(orig_mp4_dopen, &phys_end, dmap_base, cr3);
+                klog_printf("[DMAP_TEXT] orig_mp4_dopen=0x%llx -> phys=0x%llx\n",
+                            (unsigned long long)orig_mp4_dopen, (unsigned long long)phys_text);
+
+                if (phys_text != (uint64_t)-1) {
+                    uint64_t dmap_alias_text = dmap_base + phys_text;
+                    uint8_t text_code[128] = {0};
+                    /* СТРОГО READ-ONLY ЧЕРЕЗ DUMP_MEM! */
+                    kekcall(KEKCALL_DUMP_MEM, dmap_alias_text, (uintptr_t)text_code, 128);
+                    klog_printf("[DMAP_TEXT] === 128 bytes of mp4_cdev_open via DMAP alias @ 0x%llx ===\n",
+                                (unsigned long long)dmap_alias_text);
+                    for (int b = 0; b < 128; b += 16) {
+                        klog_printf("[DMAP_TEXT] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                    b,
+                                    text_code[b+0], text_code[b+1], text_code[b+2], text_code[b+3],
+                                    text_code[b+4], text_code[b+5], text_code[b+6], text_code[b+7],
+                                    text_code[b+8], text_code[b+9], text_code[b+10], text_code[b+11],
+                                    text_code[b+12], text_code[b+13], text_code[b+14], text_code[b+15]);
+                    }
+                }
+            } else {
+                klog_printf("[DMAP_SANITY] FAIL: rodata does not match 'null'! Aborting .text probe.\n");
+            }
+        }
     }
 
     /* Шаг 4: патчим все найденные mp4 cdevsw */
