@@ -711,13 +711,53 @@ find_and_patch_mp4_cdevsw(void)
             klog_printf("[MP4_CSW] +0x%02x = 0x%016llx\n", off, (unsigned long long)val);
         }
 
-        /* 4. Дамп первых 64 байт тела функции d_open ядра */
-        if ((mp4_d_open_func & 0xFFFF000000000000ULL) == 0xFFFF000000000000ULL) {
-            uint64_t code_words[8] = {0};
-            kekcall(KEKCALL_DUMP_MEM, mp4_d_open_func, (uintptr_t)code_words, 64);
-            klog_printf("[MP4_CODE] first 64 bytes of mp4_open (0x%llx):\n", (unsigned long long)mp4_d_open_func);
-            for (int w = 0; w < 8; w++) {
-                klog_printf("[MP4_CODE] +0x%02x: 0x%016llx\n", w * 8, (unsigned long long)code_words[w]);
+        /* 2. Тест открытия с KEKCALL_MAX_CAPS (sce_caps = all 1s) */
+        klog_printf("[TEST_OPEN] 2. attempting with KEKCALL_MAX_CAPS (all caps = 0xFF)...\n");
+        uint64_t caps_backup[10] = {0};
+        long cr = kekcall(KEKCALL_MAX_CAPS, 0, (uintptr_t)caps_backup, 0);
+        int cfd = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
+        int cerr = errno;
+        klog_printf("[TEST_OPEN] max_caps open result: fd=%d errno=%d (ret=%ld)\n", cfd, cerr, cr);
+        if (cr == 0) {
+            kekcall(KEKCALL_RESTORE_CAPS, 0, (uintptr_t)caps_backup, 0);
+        }
+        if (cfd >= 0) {
+            klog_printf("[TEST_OPEN] *** SUCCESS! /dev/mp4/dump_for_decid OPENED WITH MAX_CAPS! fd=%d ***\n", cfd);
+            close(cfd);
+        }
+
+        /* 3. Тест прямой записи d_open через kekcall(2) (copyin в ядро) */
+        uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+        uint64_t justreturn_addr = kbase - 0xA686F0ULL;
+        klog_printf("[PATCH] testing kernel write via kekcall(2) to csw+0x10 (0x%llx)...\n",
+                    (unsigned long long)(mp4_parent_csw + 0x10ULL));
+
+        /* Формируем 48-байтный буфер с justreturn_addr на смещении 0 */
+        uint64_t patch_payload[6] = {
+            justreturn_addr,
+            0, /* d_fdopen */
+            mp4_d_open_func + 8, /* d_close */
+            0, 0, 0
+        };
+
+        /* kekcall(2, target_kaddr, ...) */
+        long wr_ret = kekcall(2, mp4_parent_csw + 0x10ULL, (uintptr_t)patch_payload, 0);
+        klog_printf("[PATCH] kekcall(2) returned %ld\n", wr_ret);
+
+        /* Проверяем, изменился ли d_open */
+        uint64_t readback = 0;
+        kekcall(KEKCALL_DUMP_MEM, mp4_parent_csw + 0x10ULL, (uintptr_t)&readback, 8);
+        klog_printf("[PATCH] d_open readback = 0x%llx (orig 0x%llx, expected 0x%llx)\n",
+                    (unsigned long long)readback, (unsigned long long)mp4_d_open_func,
+                    (unsigned long long)justreturn_addr);
+
+        if (readback == justreturn_addr) {
+            klog_printf("[PATCH] *** BINGO! d_open PATCHED TO justreturn! ***\n");
+            int pfd = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
+            klog_printf("[PATCH] post-patch open result: fd=%d errno=%d\n", pfd, errno);
+            if (pfd >= 0) {
+                klog_printf("[PATCH] *** SUCCESS! /dev/mp4/dump_for_decid OPENED! fd=%d ***\n", pfd);
+                close(pfd);
             }
         }
     } else {
