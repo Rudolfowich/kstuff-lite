@@ -854,71 +854,50 @@ find_and_patch_mp4_cdevsw(void)
         return -1;
     }
 
-    /* Шаг 3.1: DMAP Sanity-Check и чтение 128 байт mp4_cdev_open */
-    unsigned long dmap_base = 0;
-    unsigned long cr3 = kernel_get_proc_cr3(-1, &dmap_base);
-    klog_printf("[DMAP] cr3=0x%lx dmap_base=0x%lx\n", cr3, dmap_base);
+    /* Микро-тест чтения памяти через KEKCALL_DUMP_MEM */
+    klog_printf("[READ_TEST] === Starting 3-step micro-test ===\n");
 
-    uint64_t null_dname_ptr = 0;
-    kekcall(KEKCALL_DUMP_MEM, null_parent_csw + 0x08ULL, (uintptr_t)&null_dname_ptr, 8);
-    klog_printf("[DMAP] null_csw.d_name ptr = 0x%llx\n", (unsigned long long)null_dname_ptr);
+    /* Шаг 1: Прочитать 16 байт .data (null_parent_csw) */
+    uint64_t data_v = null_parent_csw;
+    char data_bytes[16] = {0};
+    long r_data = kekcall(KEKCALL_DUMP_MEM, data_v, (uintptr_t)data_bytes, 16);
+    klog_printf("[READ_TEST] Step 1 (.data @ 0x%llx): ret=%ld, first_u64=0x%lx\n",
+                (unsigned long long)data_v, r_data, *(unsigned long*)data_bytes);
 
-    if (dmap_base && cr3 && null_dname_ptr) {
-        uint64_t vaddr_test = null_parent_csw; // .data vaddr
-        uint64_t phys_end = 0;
-        uint64_t phys_test = virt2phys(vaddr_test, &phys_end, dmap_base, cr3);
-        klog_printf("[DMAP_SANITY] vaddr=0x%llx -> phys=0x%llx\n",
-                    (unsigned long long)vaddr_test, (unsigned long long)phys_test);
-        if (phys_test != (uint64_t)-1) {
-            uint64_t dmap_alias_test = dmap_base + phys_test;
-            uint8_t buf_direct[16] = {0};
-            uint8_t buf_dmap[16] = {0};
-            kekcall(KEKCALL_DUMP_MEM, vaddr_test, (uintptr_t)buf_direct, 16);
-            kekcall(KEKCALL_DUMP_MEM, dmap_alias_test, (uintptr_t)buf_dmap, 16);
+    /* Шаг 2: Прочитать 16 байт .rodata */
+    uint64_t rodata_v = 0xffffffff9052ccb4ULL;
+    char rodata_bytes[16] = {0};
+    long r_rodata = kekcall(KEKCALL_DUMP_MEM, rodata_v, (uintptr_t)rodata_bytes, 16);
+    klog_printf("[READ_TEST] Step 2 (.rodata @ 0x%llx): ret=%ld, str='%.16s'\n",
+                (unsigned long long)rodata_v, r_rodata, rodata_bytes);
 
-            int match = (memcmp(buf_direct, buf_dmap, 16) == 0);
-            klog_printf("[DMAP_SANITY] direct vs dmap match=%d (direct[0..7]=0x%lx, dmap[0..7]=0x%lx)\n",
-                        match, *(unsigned long*)buf_direct, *(unsigned long*)buf_dmap);
+    /* Шаг 3: Микро-тест 1 байт .text (mp4_cdev_open) */
+    uint64_t mp4_csw0 = mp4_parent_csws[0];
+    for (int m = 0; m < mp4_count; m++) {
+        if (strstr(mp4_names[m], "dump")) mp4_csw0 = mp4_parent_csws[m];
+    }
+    uint64_t mp4_dclose = 0;
+    kekcall(KEKCALL_DUMP_MEM, mp4_csw0 + 0x20ULL, (uintptr_t)&mp4_dclose, 8);
+    uint64_t text_v = mp4_dclose ? (mp4_dclose - 8) : 0xffffffff8f4dcf38ULL;
 
-            if (match) {
-                klog_printf("[DMAP_SANITY] *** BINGO! DMAP translation VERIFIED via memcmp! ***\n");
+    char text_byte[8] = {0};
+    klog_printf("[READ_TEST] Step 3: ABOUT to try .text 1 byte at 0x%llx\n", (unsigned long long)text_v);
+    long r_text = kekcall(KEKCALL_DUMP_MEM, text_v, (uintptr_t)text_byte, 1);
+    klog_printf("[READ_TEST] Step 3 (.text @ 0x%llx): ret=%ld, byte=0x%02x\n",
+                (unsigned long long)text_v, r_text, (unsigned char)text_byte[0]);
 
-                /* Извлекаем адрес оригинального mp4 d_open: d_close - 8 */
-                uint64_t mp4_csw0 = mp4_parent_csws[0];
-                for (int m = 0; m < mp4_count; m++) {
-                    if (strstr(mp4_names[m], "dump")) mp4_csw0 = mp4_parent_csws[m];
-                }
-                uint64_t mp4_dclose = 0;
-                kekcall(KEKCALL_DUMP_MEM, mp4_csw0 + 0x20ULL, (uintptr_t)&mp4_dclose, 8);
-                uint64_t orig_mp4_dopen = mp4_dclose - 8;
-                klog_printf("[DMAP_TEXT] mp4_dclose=0x%llx -> orig_mp4_dopen=0x%llx\n",
-                            (unsigned long long)mp4_dclose, (unsigned long long)orig_mp4_dopen);
-
-                uint64_t phys_text = virt2phys(orig_mp4_dopen, &phys_end, dmap_base, cr3);
-                klog_printf("[DMAP_TEXT] orig_mp4_dopen=0x%llx -> phys=0x%llx\n",
-                            (unsigned long long)orig_mp4_dopen, (unsigned long long)phys_text);
-
-                if (phys_text != (uint64_t)-1) {
-                    uint64_t dmap_alias_text = dmap_base + phys_text;
-                    uint8_t text_code[128] = {0};
-                    /* СТРОГО READ-ONLY ЧЕРЕЗ DUMP_MEM! */
-                    kekcall(KEKCALL_DUMP_MEM, dmap_alias_text, (uintptr_t)text_code, 128);
-                    klog_printf("[DMAP_TEXT] === 128 bytes of mp4_cdev_open via DMAP alias @ 0x%llx ===\n",
-                                (unsigned long long)dmap_alias_text);
-                    for (int b = 0; b < 128; b += 16) {
-                        klog_printf("[DMAP_TEXT] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                                    b,
-                                    text_code[b+0], text_code[b+1], text_code[b+2], text_code[b+3],
-                                    text_code[b+4], text_code[b+5], text_code[b+6], text_code[b+7],
-                                    text_code[b+8], text_code[b+9], text_code[b+10], text_code[b+11],
-                                    text_code[b+12], text_code[b+13], text_code[b+14], text_code[b+15]);
-                    }
-                } else {
-                    klog_printf("[DMAP_TEXT] ERROR: virt2phys for orig_mp4_dopen returned -1!\n");
-                }
-            } else {
-                klog_printf("[DMAP_SANITY] FAIL: direct and dmap buffers do not match! Aborting .text probe.\n");
-            }
+    if (r_text == 8 /* count*8 */ || r_text == 1 || (r_text == 0 && text_byte[0] != 0)) {
+        klog_printf("[READ_TEST] *** SUCCESS! 1 byte .text read without panic! Reading 128 bytes... ***\n");
+        uint8_t text_code[128] = {0};
+        kekcall(KEKCALL_DUMP_MEM, text_v, (uintptr_t)text_code, 128);
+        klog_printf("[READ_TEST] === 128 bytes of mp4_cdev_open @ 0x%llx ===\n", (unsigned long long)text_v);
+        for (int b = 0; b < 128; b += 16) {
+            klog_printf("[READ_TEST] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                        b,
+                        text_code[b+0], text_code[b+1], text_code[b+2], text_code[b+3],
+                        text_code[b+4], text_code[b+5], text_code[b+6], text_code[b+7],
+                        text_code[b+8], text_code[b+9], text_code[b+10], text_code[b+11],
+                        text_code[b+12], text_code[b+13], text_code[b+14], text_code[b+15]);
         }
     }
 
