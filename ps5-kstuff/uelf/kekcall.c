@@ -445,31 +445,35 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         uint64_t kbase = (uint64_t)kdata_base;
         uint64_t scan_bytes = scan_mb * 1024ULL * 1024ULL;
 
-        /* Pattern: "/dev/mp4" little-endian u64 */
-        const uint64_t needle = 0x34706d2f7665642fULL;
+        /* Pattern: "mp4/dump" little-endian u64 */
+        const uint64_t needle = 0x706d75642f34706dULL;
 
         uint64_t finds[32] = {0};
         unsigned nfound = 0;
+        unsigned total = 0;
 
-        #define CHUNK 128
-        uint8_t buf[CHUNK];
+        uint8_t buf[128];
 
-        for (uint64_t off = 0; off + 8 < scan_bytes && nfound < 32; off += (CHUNK - 8)) {
-            if (copy_from_kernel(buf, kbase + off, CHUNK) != 0) continue;
-            for (unsigned i = 0; i + 8 <= CHUNK; i++) {
+        for (uint64_t off = 0; off + 8 < scan_bytes; off += 120) {
+            if (copy_from_kernel(buf, kbase + off, 128) != 0) continue;
+            for (unsigned i = 0; i + 8 <= 128; i++) {
                 uint64_t v;
                 __builtin_memcpy(&v, buf + i, 8);
                 if (v == needle) {
-                    finds[nfound++] = kbase + off + i;
-                    if (nfound >= 32) break;
+                    total++;
+                    if (nfound < 32) {
+                        log_word(0xAA00000000000000ULL | (uint64_t)nfound);
+                        log_word(kbase + off + i);
+                        finds[nfound++] = kbase + off + i;
+                    }
                 }
             }
         }
 
-        if (copy_to_kernel(user_buf, finds, sizeof(finds)))
+        if (copy_to_kernel(user_buf, finds, sizeof(finds)) != 0)
             return EFAULT;
 
-        args[RAX] = nfound;
+        args[RAX] = total;
         return 0;
     }
     else if(nr == 0xffffffff)
