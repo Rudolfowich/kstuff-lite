@@ -387,27 +387,44 @@ scan_cdevsw(void)
     uint32_t D_VER_FREEBSD9 = 0x17122009;
     uint32_t D_VER_FREEBSD5 = 0x20011966;
 
-    klog_printf("[CDVS] scan .data for D_VERSION (0x%08x or 0x%08x) from kbase=0x%llx\n",
-                D_VER_FREEBSD9, D_VER_FREEBSD5, (unsigned long long)kbase);
+    /* .data начинается с kbase + 0xD9D000 */
+    uint64_t data_start = kbase + 0xD9D000ULL;
+    uint64_t scan_size  = 16ULL * 1024ULL * 1024ULL;  /* 16 MB сегмента данных */
+
+    klog_printf("[CDVS] scan .data 0x%llx..0x%llx (16 MB) for D_VERSION\n",
+                (unsigned long long)data_start,
+                (unsigned long long)(data_start + scan_size));
 
     int found = 0;
-    for (uint64_t off = 0; off < 32 * 1024 * 1024; off += 4096) {
-        uint8_t buf[4096];
-        if (kekcall(KEKCALL_DUMP_MEM, kbase + off, (uintptr_t)buf, 4096) != 0)
+    for (uint64_t off = 0; off < scan_size; off += 1024) {
+        uint64_t cur_addr = data_start + off;
+
+        /* SAFE-PROBE перед чтением чанка */
+        uint64_t probe = 0;
+        if (kekcall(KEKCALL_SAFE_PEEK, cur_addr, (uintptr_t)&probe, 0) != 0)
             continue;
 
-        for (int i = 0; i + 32 <= 4096; i += 8) {
+        uint8_t buf[1024];
+        if (kekcall(KEKCALL_DUMP_MEM, cur_addr, (uintptr_t)buf, 1024) != 0)
+            continue;
+
+        for (int i = 0; i + 32 <= 1024; i += 8) {
             uint32_t ver;
             __builtin_memcpy(&ver, buf + i, 4);
             if (ver != D_VER_FREEBSD9 && ver != D_VER_FREEBSD5)
                 continue;
 
-            uint64_t cdevsw_addr = kbase + off + i;
+            uint64_t cdevsw_addr = cur_addr + i;
             uint64_t d_name_ptr = 0;
             __builtin_memcpy(&d_name_ptr, buf + i + 8, 8);
             if (!d_name_ptr)
                 continue;
             if ((d_name_ptr & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL)
+                continue;
+
+            /* SAFE-PROBE указателя d_name перед его чтением */
+            uint64_t probe_name = 0;
+            if (kekcall(KEKCALL_SAFE_PEEK, d_name_ptr, (uintptr_t)&probe_name, 0) != 0)
                 continue;
 
             char name[32];
@@ -437,9 +454,14 @@ scan_cdevsw(void)
                             (unsigned long long)d_open);
             }
             found++;
-            if (found > 500) break;
+            if (found > 300) break;
         }
-        if (found > 500) break;
+        if (found > 300) break;
+
+        /* Периодический сон каждые 128 KB для разгрузки процессора */
+        if ((off & 0x1FFFF) == 0) {
+            usleep(1000);
+        }
     }
 
     klog_printf("[CDVS] done, found %d cdevsw\n", found);
