@@ -614,6 +614,45 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = total;
         return 0;
     }
+    else if(nr == 23)
+    {
+        /* SCAN_PTR_CUSTOM: scan memory for 8-byte pointer value from custom base.
+         * args[RDI] = user_buf (uint64_t[32])
+         * args[RSI] = needle (8-byte pointer value)
+         * args[RDX] = scan_mb (default 8)
+         * args[R8]  = start_abs (0 = kdata_base) */
+        uint64_t user_buf = args[RDI];
+        uint64_t needle = args[RSI];
+        uint64_t scan_mb = args[RDX];
+        uint64_t start_abs = args[R8];
+        if (!user_buf || !needle) return 1;
+        if (scan_mb == 0 || scan_mb > 128) scan_mb = 8;
+
+        extern char kdata_base[];
+        uint64_t kbase = start_abs ? start_abs : (uint64_t)kdata_base;
+        uint64_t scan_bytes = scan_mb * 1024ULL * 1024ULL;
+
+        uint64_t finds[32] = {0};
+        unsigned nfound = 0, total = 0;
+        uint8_t buf[128];
+
+        for (uint64_t off = 0; off + 8 < scan_bytes; off += 120) {
+            if (copy_from_kernel(buf, kbase + off, 128) != 0) continue;
+            for (unsigned i = 0; i + 8 <= 128; i++) {
+                uint64_t v;
+                __builtin_memcpy(&v, buf + i, 8);
+                if (v == needle) {
+                    total++;
+                    if (nfound < 32) finds[nfound++] = kbase + off + i;
+                }
+            }
+        }
+
+        if (copy_to_kernel(user_buf, finds, sizeof(finds)) != 0)
+            return EFAULT;
+        args[RAX] = total;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;

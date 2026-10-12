@@ -63,7 +63,7 @@ a53_find_profile(uint32_t fw, uint32_t cond)
 int
 probe_mp4_device(void)
 {
-    /* Find str_addr dynamically */
+    /* 1. Найти str_addr */
     uint64_t str_addr = 0;
     static uint64_t g_str[32];
     for (int i = 0; i < 32; i++) g_str[i] = 0;
@@ -74,54 +74,56 @@ probe_mp4_device(void)
             break;
         }
     }
-    if (!str_addr) { klog_puts("[a53] can't find str_addr\n"); return -1; }
+    if (!str_addr) {
+        klog_puts("[a53] can't find str_addr\n");
+        return -1;
+    }
     klog_printf("[a53] str_addr = 0x%llx\n", (unsigned long long)str_addr);
 
-    /* === Approach 4: xref ВПЕРЁД, 30 chunks × 1MB === */
-    klog_puts("[a53] APPROACH 4 FIXED: xref forward chunks\n");
-    for (int chunk = 0; chunk < 30; chunk++) {
-        static uint64_t g_xref[32];
-        for (int i = 0; i < 32; i++) g_xref[i] = 0;
-        uint64_t cs = str_addr + (uint64_t)chunk * 1024ULL * 1024ULL;
-        long n = kekcall(KEKCALL_SCAN_XREF_V2, str_addr, (uintptr_t)g_xref, cs);
-        if (n > 0) {
-            klog_printf("[a53] FOUND! chunk %d start=0x%llx total=%ld\n", 
-                        chunk, (unsigned long long)cs, n);
-            for (int i = 0; i < 32; i++) {
-                if (g_xref[i]) klog_printf("[a53]   x[%d] = 0x%016llx\n", i, (unsigned long long)g_xref[i]);
-            }
-            return 0;
-        }
-    }
-    klog_puts("[a53] A4 forward: 0 находок в 30 MB\n");
-
-    /* === Approach 1 расширенный: ptr scan .data до 64 MB вперёд === */
+    /* ===== APPROACH 1 EXTENDED: ptr scan .data 64 MB вперёд от kdata_base ===== */
     klog_puts("[a53] APPROACH 1 EXTENDED: ptr scan .data forward 64MB\n");
     static uint64_t g_p[32];
     for (int i = 0; i < 32; i++) g_p[i] = 0;
     long np = kekcall(KEKCALL_SCAN_PTR, (uintptr_t)g_p, str_addr, 64);
-    klog_printf("[a53] ptr scan 64MB forward: total=%ld\n", np);
+    klog_printf("[a53] ptr scan 64MB: total=%ld\n", np);
     for (int i = 0; i < 32; i++) {
         if (g_p[i]) klog_printf("[a53]   ptr[%d] = 0x%016llx\n", i, (unsigned long long)g_p[i]);
     }
     if (np > 0) return 0;
 
-    /* === Approach 5: xref НАЗАД в маленьких chunks (может .text позади .rodata) === */
-    klog_puts("[a53] APPROACH 5: xref backward chunks 1MB each (safe)\n");
-    for (int chunk = 1; chunk <= 30; chunk++) {
+    /* ===== APPROACH 5: xref НАЗАД chunks 1MB x 60 — расширили до 60 MB ===== */
+    klog_puts("[a53] APPROACH 5 EXTENDED: xref backward chunks 1MB x 60\n");
+    for (int chunk = 1; chunk <= 60; chunk++) {
         static uint64_t g_xref[32];
         for (int i = 0; i < 32; i++) g_xref[i] = 0;
         uint64_t cs = str_addr - (uint64_t)chunk * 1024ULL * 1024ULL;
         long n = kekcall(KEKCALL_SCAN_XREF_V2, str_addr, (uintptr_t)g_xref, cs);
         if (n > 0) {
-            klog_printf("[a53] FOUND! chunk -%d start=0x%llx total=%ld\n", 
+            klog_printf("[a53] FOUND! chunk -%d start=0x%llx total=%ld\n",
                         chunk, (unsigned long long)cs, n);
             for (int i = 0; i < 32; i++) {
                 if (g_xref[i]) klog_printf("[a53]   x[%d] = 0x%016llx\n", i, (unsigned long long)g_xref[i]);
             }
             return 0;
         }
+        /* Печатаем каждые 10 chunks для прогресса */
+        if (chunk % 10 == 0) {
+            klog_printf("[a53] scanned -%d MB, still 0 finds\n", chunk);
+        }
     }
+
+    /* ===== APPROACH 6: ptr scan .data НАЗАД от kdata_base 32 MB =====
+     * На случай если .data размещена ПЕРЕД kdata_base */
+    klog_puts("[a53] APPROACH 6: ptr scan .data BACKWARD 32MB\n");
+    extern char kdata_base[];
+    uint64_t kbase_back = (uint64_t)kdata_base - (32ULL * 1024 * 1024);
+    for (int i = 0; i < 32; i++) g_p[i] = 0;
+    long np_back = kekcall5(KEKCALL_SCAN_PTR_CUSTOM, (uintptr_t)g_p, str_addr, 32, kbase_back);
+    klog_printf("[a53] ptr scan 32MB backward: total=%ld\n", np_back);
+    for (int i = 0; i < 32; i++) {
+        if (g_p[i]) klog_printf("[a53]   ptr_back[%d] = 0x%016llx\n", i, (unsigned long long)g_p[i]);
+    }
+    if (np_back > 0) return 0;
 
     klog_puts("[a53] all approaches: 0 найдено\n");
     return -1;
