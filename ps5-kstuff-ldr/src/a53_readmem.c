@@ -698,6 +698,21 @@ find_and_patch_mp4_cdevsw(void)
                     (unsigned long long)mp4_parent_csw, (unsigned long long)mp4_d_open_func,
                     (unsigned long long)mp4_d_close_func);
 
+        /* Дамп 32 байт машинного кода d_open и d_close */
+        uint8_t d_open_code[32] = {0};
+        uint8_t d_close_code[32] = {0};
+        kekcall(KEKCALL_DUMP_MEM, mp4_d_open_func, (uintptr_t)d_open_code, 32);
+        kekcall(KEKCALL_DUMP_MEM, mp4_d_close_func, (uintptr_t)d_close_code, 32);
+
+        klog_printf("[DISASM] d_open @ 0x%llx: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                    (unsigned long long)mp4_d_open_func,
+                    d_open_code[0], d_open_code[1], d_open_code[2], d_open_code[3],
+                    d_open_code[4], d_open_code[5], d_open_code[6], d_open_code[7]);
+        klog_printf("[DISASM] d_close @ 0x%llx: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                    (unsigned long long)mp4_d_close_func,
+                    d_close_code[0], d_close_code[1], d_close_code[2], d_close_code[3],
+                    d_close_code[4], d_close_code[5], d_close_code[6], d_close_code[7]);
+
         /* Прямой патч d_open через KEKCALL_WRITE64 (kekcall 27) на адрес d_close (+0x20) */
         klog_printf("[PATCH] writing d_open via KEKCALL_WRITE64(27) to csw+0x10 (0x%llx) val=d_close (0x%llx)...\n",
                     (unsigned long long)(mp4_parent_csw + 0x10ULL), (unsigned long long)mp4_d_close_func);
