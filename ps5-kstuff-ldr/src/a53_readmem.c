@@ -77,16 +77,29 @@ probe_mp4_device(void)
     static uint64_t g_inline[32];
     for (int i = 0; i < 32; i++) g_inline[i] = 0;
     uint64_t str_addr = 0;
-    long n1 = kekcall(KEKCALL_SCAN_DMEM, 128, (uintptr_t)g_inline,
-                      proc_va - (64ULL * 1024 * 1024));
-    klog_printf("[a53] inline scan: total=%ld\n", n1);
-    for (int i = 0; i < 32; i++) {
-        if (g_inline[i]) {
-            klog_printf("[a53]   inline[%2d] = 0x%016llx\n", i, (unsigned long long)g_inline[i]);
-            /* Выбираем именно второй адрес (mp4/dump), если есть оба, иначе первый */
-            if (i == 1 || !str_addr) str_addr = g_inline[i];
+
+    uint64_t arena_proc = proc_va & ~0xFFFFFFFFULL;
+    uint64_t inline_starts[] = {
+        arena_proc + 0x90000000ULL,                /* точный район 0x93cd38aa */
+        0,                                         /* kdata_base */
+        proc_va - (64ULL * 1024 * 1024),
+    };
+
+    long n1 = 0;
+    for (int idx = 0; idx < 3; idx++) {
+        for (int i = 0; i < 32; i++) g_inline[i] = 0;
+        n1 = kekcall(KEKCALL_SCAN_DMEM, 128, (uintptr_t)g_inline, inline_starts[idx]);
+        klog_printf("[a53] inline scan #%d (0x%llx): total=%ld\n",
+                    idx, (unsigned long long)inline_starts[idx], n1);
+        for (int i = 0; i < 32; i++) {
+            if (g_inline[i]) {
+                klog_printf("[a53]   inline[%2d] = 0x%016llx\n", i, (unsigned long long)g_inline[i]);
+                if (i == 1 || !str_addr) str_addr = g_inline[i];
+            }
         }
+        if (str_addr) break;
     }
+
     if (!str_addr) {
         klog_puts("[a53] NO inline find — abort\n");
         return -1;
