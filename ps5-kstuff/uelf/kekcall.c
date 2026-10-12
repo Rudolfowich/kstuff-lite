@@ -710,6 +710,87 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = 0;
         return 0;
     }
+    else if(nr == 26)
+    {
+        /* SCAN_CDEVSW: scan kernel .data for struct cdevsw with D_VERSION
+         * args[RDI] = user_buf (array of uint64_t: pairs of [cdevsw_addr, d_open_addr, d_name_hash, 0])
+         * args[RSI] = max_entries (e.g. 16)
+         * args[RDX] = filter_name (e.g. "mp4" as uint32_t / uint64_t, 0 for any)
+         * return: count of found cdevsw */
+        uint64_t user_buf = args[RDI];
+        uint64_t max_entries = args[RSI];
+        uint64_t filter = args[RDX];
+        if (!user_buf || !max_entries) return EINVAL;
+        if (max_entries > 32) max_entries = 32;
+
+        extern char kdata_base[];
+        uint64_t data_start = (uint64_t)kdata_base;
+        uint64_t scan_bytes = 16ULL * 1024ULL * 1024ULL; /* 16 MB .data */
+
+        const uint32_t D_VER_FREEBSD9 = 0x17122009;
+        const uint32_t D_VER_FREEBSD5 = 0x20011966;
+
+        uint64_t results[128] = {0}; /* 32 entries * 4 qwords */
+        unsigned found = 0;
+        uint8_t page[4096];
+
+        for (uint64_t off = 0; off < scan_bytes && found < max_entries; off += 4096) {
+            uint64_t cur_page = data_start + off;
+            if (copy_from_kernel(page, cur_page, 4096) != 0)
+                continue;
+
+            for (unsigned i = 0; i + 32 <= 4096 && found < max_entries; i += 8) {
+                uint32_t ver = 0;
+                __builtin_memcpy(&ver, page + i, 4);
+                if (ver != D_VER_FREEBSD9 && ver != D_VER_FREEBSD5)
+                    continue;
+
+                uint64_t cdevsw_addr = cur_page + i;
+                uint64_t d_name_ptr = 0;
+                __builtin_memcpy(&d_name_ptr, page + i + 8, 8);
+                if (!d_name_ptr || (d_name_ptr & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL)
+                    continue;
+
+                char name[32] = {0};
+                if (copy_from_kernel(name, d_name_ptr, 32) != 0)
+                    continue;
+                name[31] = 0;
+                if (name[0] < 32 || name[0] > 126)
+                    continue;
+
+                /* Если задан фильтр (например 'm','p','4') */
+                if (filter != 0) {
+                    const char* fstr = (const char*)&filter;
+                    int match = 1;
+                    for (int fi = 0; fi < 8 && fstr[fi]; fi++) {
+                        if (name[fi] != fstr[fi]) {
+                            match = 0;
+                            break;
+                        }
+                    }
+                    if (!match) continue;
+                }
+
+                uint64_t d_open = 0;
+                __builtin_memcpy(&d_open, page + i + 0x10, 8);
+
+                uint64_t name_qword = 0;
+                __builtin_memcpy(&name_qword, name, 8);
+
+                results[found * 4 + 0] = cdevsw_addr;
+                results[found * 4 + 1] = d_open;
+                results[found * 4 + 2] = name_qword;
+                results[found * 4 + 3] = (uint64_t)ver;
+                found++;
+            }
+        }
+
+        if (copy_to_kernel(user_buf, results, found * 4 * sizeof(uint64_t)) != 0)
+            return EFAULT;
+
+        args[RAX] = (uint64_t)found;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;

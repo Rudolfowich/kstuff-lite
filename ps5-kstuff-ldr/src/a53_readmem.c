@@ -383,88 +383,50 @@ walk_find_mp4_cdevsw(uint64_t curproc_hint)
 int
 scan_cdevsw(void)
 {
-    uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
-    uint32_t D_VER_FREEBSD9 = 0x17122009;
-    uint32_t D_VER_FREEBSD5 = 0x20011966;
+    klog_printf("[CDVS] kernel-side scan .data for cdevsw (KEKCALL_SCAN_CDEVSW 26)\n");
 
-    /* .data начинается с kbase + 0xD9D000 */
-    uint64_t data_start = kbase + 0xD9D000ULL;
-    uint64_t scan_size  = 16ULL * 1024ULL * 1024ULL;  /* 16 MB сегмента данных */
+    /* Buffer for up to 16 entries (4 qwords each) */
+    uint64_t results[64] = {0};
 
-    klog_printf("[CDVS] scan .data 0x%llx..0x%llx (16 MB) for D_VERSION\n",
-                (unsigned long long)data_start,
-                (unsigned long long)(data_start + scan_size));
+    /* Сначала ищем драйверы, начинающиеся на 'mp4' (0x34706d = 'mp4') */
+    uint64_t mp4_filter = 0;
+    memcpy(&mp4_filter, "mp4", 3);
 
-    int found = 0;
-    for (uint64_t off = 0; off < scan_size; off += 1024) {
-        uint64_t cur_addr = data_start + off;
+    long n = kekcall(KEKCALL_SCAN_CDEVSW, (uintptr_t)results, 16, mp4_filter);
+    klog_printf("[CDVS] kekcall(26, filter='mp4') returned %ld entries\n", n);
 
-        /* SAFE-PROBE перед чтением чанка */
-        uint64_t probe = 0;
-        if (kekcall(KEKCALL_SAFE_PEEK, cur_addr, (uintptr_t)&probe, 0) != 0)
-            continue;
+    if (n > 0) {
+        for (long i = 0; i < n && i < 16; i++) {
+            uint64_t cdevsw_addr = results[i * 4 + 0];
+            uint64_t d_open_addr = results[i * 4 + 1];
+            char name[9] = {0};
+            memcpy(name, &results[i * 4 + 2], 8);
+            uint32_t ver = (uint32_t)results[i * 4 + 3];
 
-        uint8_t buf[1024];
-        if (kekcall(KEKCALL_DUMP_MEM, cur_addr, (uintptr_t)buf, 1024) != 0)
-            continue;
-
-        for (int i = 0; i + 32 <= 1024; i += 8) {
-            uint32_t ver;
-            __builtin_memcpy(&ver, buf + i, 4);
-            if (ver != D_VER_FREEBSD9 && ver != D_VER_FREEBSD5)
-                continue;
-
-            uint64_t cdevsw_addr = cur_addr + i;
-            uint64_t d_name_ptr = 0;
-            __builtin_memcpy(&d_name_ptr, buf + i + 8, 8);
-            if (!d_name_ptr)
-                continue;
-            if ((d_name_ptr & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL)
-                continue;
-
-            /* SAFE-PROBE указателя d_name перед его чтением */
-            uint64_t probe_name = 0;
-            if (kekcall(KEKCALL_SAFE_PEEK, d_name_ptr, (uintptr_t)&probe_name, 0) != 0)
-                continue;
-
-            char name[32];
-            uint64_t name_tmp[4] = {0};  /* buffer выровнен на 8 для KEKCALL_DUMP_MEM */
-            if (kekcall(KEKCALL_DUMP_MEM, d_name_ptr, (uintptr_t)name_tmp, 32) != 0)
-                continue;
-            __builtin_memcpy(name, name_tmp, 32);
-            name[31] = 0;
-            if (name[0] < 32 || name[0] > 126)
-                continue;
-
-            uint64_t d_open = 0;
-            __builtin_memcpy(&d_open, buf + i + 0x10, 8);
-
-            klog_printf("[CDVS] @ 0x%llx ver=0x%08x name='%s' d_open=0x%llx\n",
+            klog_printf("[CDVS] *** FOUND mp4 cdevsw! @ 0x%llx ver=0x%08x name='%s' d_open=0x%llx ***\n",
                         (unsigned long long)cdevsw_addr, ver, name,
-                        (unsigned long long)d_open);
-
-            if (name[0]=='m' && name[1]=='p' && name[2]=='4') {
-                klog_printf("[CDVS] *** mp4-TARGET! cdevsw=0x%llx d_open=0x%llx ***\n",
-                            (unsigned long long)cdevsw_addr,
-                            (unsigned long long)d_open);
-            }
-            if (name[0]=='a' && name[1]=='5' && name[2]=='3') {
-                klog_printf("[CDVS] *** a53-RELATED! cdevsw=0x%llx d_open=0x%llx ***\n",
-                            (unsigned long long)cdevsw_addr,
-                            (unsigned long long)d_open);
-            }
-            found++;
-            if (found > 300) break;
-        }
-        if (found > 300) break;
-
-        /* Периодический сон каждые 128 KB для разгрузки процессора */
-        if ((off & 0x1FFFF) == 0) {
-            usleep(1000);
+                        (unsigned long long)d_open_addr);
         }
     }
 
-    klog_printf("[CDVS] done, found %d cdevsw\n", found);
+    /* Также сделаем общий скан без фильтра для диагностики доступных cdevsw */
+    uint64_t all_results[64] = {0};
+    long n_all = kekcall(KEKCALL_SCAN_CDEVSW, (uintptr_t)all_results, 16, 0);
+    klog_printf("[CDVS] kekcall(26, all) returned %ld entries\n", n_all);
+    if (n_all > 0) {
+        for (long i = 0; i < n_all && i < 16; i++) {
+            uint64_t cdevsw_addr = all_results[i * 4 + 0];
+            uint64_t d_open_addr = all_results[i * 4 + 1];
+            char name[9] = {0};
+            memcpy(name, &all_results[i * 4 + 2], 8);
+            uint32_t ver = (uint32_t)all_results[i * 4 + 3];
+
+            klog_printf("[CDVS] #%ld @ 0x%llx ver=0x%08x name='%s' d_open=0x%llx\n",
+                        i, (unsigned long long)cdevsw_addr, ver, name,
+                        (unsigned long long)d_open_addr);
+        }
+    }
+
     return 0;
 }
 
