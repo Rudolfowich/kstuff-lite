@@ -230,9 +230,12 @@ test_mp4_open_with_root(void)
     int err2 = errno;
     klog_printf("[OPEN] with-swap: fd=%d errno=%d\n", fd2, err2);
 
-    /* args[RSI]=user_buf (backup) */
-    long rr = kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)backup, 0);
-    klog_printf("[OPEN] restored (ret=%ld)\n", rr);
+    if (sr == 0) {
+        long rr = kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)backup, 0);
+        klog_printf("[OPEN] restored (ret=%ld)\n", rr);
+    } else {
+        klog_printf("[OPEN] swap failed (ret=%ld), skip restore\n", sr);
+    }
 
     if (fd2 >= 0) {
         klog_printf("[OPEN] *** SUCCESS! /dev/mp4/dump opened with root ucred (fd=%d) ***\n", fd2);

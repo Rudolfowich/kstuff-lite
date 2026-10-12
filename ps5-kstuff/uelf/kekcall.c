@@ -362,7 +362,7 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
     }
     else if(nr == 16)
     {
-        /* SWAP_FULL_FROM_PID: td_ucred + p_ucred от target_pid (БЕЗ p_fd!).
+        /* SWAP_FULL_FROM_PID: td_ucred + p_ucred от target_pid (или first_proc если target_pid == 0/1).
          * args[RDI] = target_pid (uint32_t)
          * args[RSI] = user_buf  (32 байта backup: backup[0..1])
          * regs[RDI] = curthread */
@@ -379,16 +379,31 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         uint64_t t_ucred = 0;
         unsigned safety = 0;
         while (p && safety++ < 500) {
-            uint64_t pid_u64 = 0;
-            kpeek64_checked(p + 0x2C0, &pid_u64);
-            if ((uint32_t)(pid_u64 & 0xFFFFFFFF) == target_pid) {
+            uint64_t pid_u64_bc = 0;
+            uint64_t pid_u64_2c0 = 0;
+            kpeek64_checked(p + 0xbc, &pid_u64_bc);
+            kpeek64_checked(p + 0x2c0, &pid_u64_2c0);
+            uint32_t pid_bc = (uint32_t)(pid_u64_bc & 0xFFFFFFFF);
+            uint32_t pid_2c0 = (uint32_t)(pid_u64_2c0 & 0xFFFFFFFF);
+
+            if (pid_bc == target_pid || pid_2c0 == target_pid) {
                 kpeek64_checked(p + 0x40, &t_ucred);
-                break;
+                if (t_ucred) break;
             }
             uint64_t next = 0;
             kpeek64_checked(p, &next);
             p = next;
         }
+
+        /* Fallback: если по PID не нашли, берём ucred первого процесса в allproc */
+        if (!t_ucred) {
+            uint64_t first_p = 0;
+            kpeek64_checked((uint64_t)allproc, &first_p);
+            if (first_p) {
+                kpeek64_checked(first_p + 0x40, &t_ucred);
+            }
+        }
+
         if (!t_ucred) return 2;
 
         uint64_t backup[4] = {0};
@@ -403,7 +418,6 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
 
         kpoke64(td + 0x140,  t_ucred);
         kpoke64(proc + 0x40, t_ucred);
-        /* ВАЖНО: p_fd НЕ трогаем! Подмена p_fd ломает таблицу дескрипторов при open() */
         args[RAX] = 0;
         return 0;
     }
@@ -421,6 +435,11 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         uint64_t backup[4] = {0};
         if (copy_from_kernel(backup, user_buf, sizeof(backup)))
             return EFAULT;
+
+        /* КРИТИЧЕСКАЯ ЗАЩИТА: НИКОГДА не писать 0/NULL в ucred! */
+        if (!backup[0] || !backup[1]) {
+            return EINVAL;
+        }
 
         kpoke64(td + 0x140,  backup[0]);
         kpoke64(proc + 0x40, backup[1]);
