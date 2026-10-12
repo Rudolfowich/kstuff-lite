@@ -394,7 +394,8 @@ sigsys_handler(int sig)
 }
 
 static uint64_t g_cdevsw_list[256];
-static int g_cdevsw_count = 0;
+static char     g_cdevsw_names[256][32];
+static int      g_cdevsw_count = 0;
 
 int
 scan_cdevsw(void)
@@ -477,7 +478,10 @@ scan_cdevsw(void)
 
             total_cdevsw++;
             if (g_cdevsw_count < 256) {
-                g_cdevsw_list[g_cdevsw_count++] = cdevsw_addr;
+                g_cdevsw_list[g_cdevsw_count] = cdevsw_addr;
+                strncpy(g_cdevsw_names[g_cdevsw_count], name, 31);
+                g_cdevsw_names[g_cdevsw_count][31] = 0;
+                g_cdevsw_count++;
             }
             klog_printf("[CDVS] #%d @ 0x%llx ver=0x%08x name='%s' d_open=0x%llx\n",
                         total_cdevsw, (unsigned long long)cdevsw_addr, ver, name,
@@ -562,15 +566,13 @@ scan_cdevsw(void)
     return 0;
 }
 
-/* Полноценный обход d_devs для каждого найденного cdevsw с поиском mp4 */
+/* Полноценный полный обход d_devs для каждого найденного cdevsw БЕЗ прерываний */
 int
 find_and_patch_mp4_cdevsw(void)
 {
-    uint64_t kbase = 0;
-    kekcall(KEKCALL_GET_KBASE, 0, (uintptr_t)&kbase, 0);
-    uint64_t justreturn_addr = kbase - 0xA686F0ULL;
-
-    klog_printf("[WALK] starting cdevsw d_devs walk for %d drivers...\n", g_cdevsw_count);
+    klog_printf("[WALK] ====================================================\n");
+    klog_printf("[WALK] FULL CDEV WALK: mapping all /dev nodes across %d cdevsw\n", g_cdevsw_count);
+    klog_printf("[WALK] ====================================================\n");
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -578,13 +580,14 @@ find_and_patch_mp4_cdevsw(void)
     sa.sa_flags = SA_NODEFER;
     sigaction(SIGSYS, &sa, NULL);
 
-    uint64_t found_cdevsw = 0;
-    uint64_t found_cdev = 0;
-    (void)found_cdev;
-    char found_name[64] = {0};
+    int total_cdev_nodes = 0;
+    uint64_t mp4_parent_csw = 0;
+    uint64_t mp4_cdev_node = 0;
+    char mp4_node_name[64] = {0};
 
     for (int idx = 0; idx < g_cdevsw_count; idx++) {
         uint64_t csw = g_cdevsw_list[idx];
+        const char *csw_name = g_cdevsw_names[idx];
         uint64_t first_cdev = 0;
 
         g_sigsys_fault = 0;
@@ -609,7 +612,7 @@ find_and_patch_mp4_cdevsw(void)
             if (is_loop) break;
             seen[depth++] = cur_cdev;
 
-            /* Читаем si_namebuf (+0xe0) и указатель si_name (+0x88..+0x98) */
+            /* Читаем si_namebuf (+0xe0) */
             char dev_name[64] = {0};
             g_sigsys_fault = 0;
             if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
@@ -622,7 +625,7 @@ find_and_patch_mp4_cdevsw(void)
             }
             if (g_sigsys_fault) break;
 
-            /* Если в inline пусто, проверим si_name как указатель на +0x88, +0x90, +0x98 */
+            /* Если inline пусто, пробуем si_name как указатель на +0x88..+0x98 */
             if (!dev_name[0]) {
                 for (uint64_t off = 0x88; off <= 0x98; off += 8) {
                     uint64_t ptr = 0;
@@ -640,18 +643,20 @@ find_and_patch_mp4_cdevsw(void)
             }
 
             if (dev_name[0]) {
-                klog_printf("[WALK] csw=0x%llx cdev=0x%llx name='%s'\n",
-                            (unsigned long long)csw, (unsigned long long)cur_cdev, dev_name);
+                total_cdev_nodes++;
+                klog_printf("[WALK] #%d csw=0x%llx csw_name='%s' cdev=0x%llx dev='%s'\n",
+                            total_cdev_nodes, (unsigned long long)csw, csw_name,
+                            (unsigned long long)cur_cdev, dev_name);
 
-                if (strstr(dev_name, "mp4") || strstr(dev_name, "dump") || strstr(dev_name, "a53")) {
+                if (strstr(dev_name, "mp4") || strstr(dev_name, "dump")) {
                     klog_printf("[WALK] ****************************************************\n");
-                    klog_printf("[WALK] *** MATCH FOUND: '%s' @ cdev=0x%llx csw=0x%llx ***\n",
-                                dev_name, (unsigned long long)cur_cdev, (unsigned long long)csw);
+                    klog_printf("[WALK] *** TARGET MATCH: '%s' @ cdev=0x%llx parent_csw=0x%llx (%s) ***\n",
+                                dev_name, (unsigned long long)cur_cdev,
+                                (unsigned long long)csw, csw_name);
                     klog_printf("[WALK] ****************************************************\n");
-                    found_cdevsw = csw;
-                    found_cdev = cur_cdev;
-                    strncpy(found_name, dev_name, sizeof(found_name) - 1);
-                    break;
+                    mp4_parent_csw = csw;
+                    mp4_cdev_node = cur_cdev;
+                    strncpy(mp4_node_name, dev_name, sizeof(mp4_node_name) - 1);
                 }
             }
 
@@ -666,35 +671,22 @@ find_and_patch_mp4_cdevsw(void)
             if (g_sigsys_fault) break;
             cur_cdev = next_cdev;
         }
-
-        if (found_cdevsw) break;
     }
 
     signal(SIGSYS, SIG_DFL);
+    klog_printf("[WALK] Full map complete. Total cdev nodes found: %d\n", total_cdev_nodes);
 
-    if (found_cdevsw) {
-        klog_printf("[WALK] Patching d_open of cdevsw @ 0x%llx to justreturn (0x%llx)...\n",
-                    (unsigned long long)found_cdevsw, (unsigned long long)justreturn_addr);
-        /* Патчим d_open (+0x10) */
-        kekcall(27 /* WRITE64 */, found_cdevsw + 0x10ULL, justreturn_addr, 0);
+    /* Тестовая проверка kekcall(26) probe на известном icc_configuration */
+    uint64_t icc_filter = 0;
+    memcpy(&icc_filter, "icc_conf", 8);
+    long probe_ret = kekcall(26, icc_filter, 0, 0);
+    klog_printf("[TEST26] kekcall(26, filter='icc_conf', do_patch=0) returned 0x%lx\n", probe_ret);
 
-        /* Проверяем чтением */
-        uint64_t check_val = 0;
-        kekcall(KEKCALL_DUMP_MEM, found_cdevsw + 0x10ULL, (uintptr_t)&check_val, 8);
-        klog_printf("[WALK] d_open verification: 0x%llx (expected 0x%llx)\n",
-                    (unsigned long long)check_val, (unsigned long long)justreturn_addr);
-
-        /* Проверяем open() */
-        int fd = open("/dev/mp4/dump", 0x0002 /* O_RDWR */);
-        klog_printf("[WALK] open(\"/dev/mp4/dump\", O_RDWR) returned fd = %d\n", fd);
-        if (fd >= 0) {
-            klog_printf("[WALK] SUCCESS! /dev/mp4/dump is OPEN and usable! fd=%d\n", fd);
-            close(fd);
-        } else {
-            klog_printf("[WALK] open returned %d, errno=%d\n", fd, errno);
-        }
+    if (mp4_parent_csw) {
+        klog_printf("[WALK] Confirmed mp4 node '%s' under parent csw 0x%llx\n",
+                    mp4_node_name, (unsigned long long)mp4_parent_csw);
     } else {
-        klog_printf("[WALK] mp4 cdev was not found across scanned cdevsw lists.\n");
+        klog_printf("[WALK] Notice: no node with 'mp4' or 'dump' in name was encountered.\n");
     }
 
     return 0;
