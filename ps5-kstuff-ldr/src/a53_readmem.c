@@ -871,50 +871,6 @@ find_and_patch_mp4_cdevsw(void)
     klog_printf("[READ_TEST] Step 2 (.rodata @ 0x%llx): ret=%ld, str='%.16s'\n",
                 (unsigned long long)rodata_v, r_rodata, rodata_bytes);
 
-    /* Шаг 3: Чтение .text (mp4_cdev_open) ЧЕРЕЗ KEKCALL_DUMP_PHYS (обход XOM!) */
-    unsigned long dmap_base = 0;
-    int my_pid = getpid();
-    unsigned long cr3 = kernel_get_proc_cr3(my_pid, &dmap_base);
-    if (!cr3) {
-        klog_printf("[DUMP_PHYS] getpid()=%d failed, falling back to pid=1 (init)\n", my_pid);
-        cr3 = kernel_get_proc_cr3(1, &dmap_base);
-    }
-    if (!cr3) {
-        klog_printf("[DUMP_PHYS] pid=1 failed, falling back to pid=-1\n", my_pid);
-        cr3 = kernel_get_proc_cr3(-1, &dmap_base);
-    }
-    klog_printf("[INIT] cr3=0x%lx dmap_base=0x%lx\n", cr3, dmap_base);
-
-    uint64_t mp4_csw0 = mp4_parent_csws[0];
-    for (int m = 0; m < mp4_count; m++) {
-        if (strstr(mp4_names[m], "dump")) mp4_csw0 = mp4_parent_csws[m];
-    }
-    uint64_t mp4_dclose = 0;
-    kekcall(KEKCALL_DUMP_MEM, mp4_csw0 + 0x20ULL, (uintptr_t)&mp4_dclose, 8);
-    uint64_t text_v = mp4_dclose ? (mp4_dclose - 8) : 0xffffffff8f4dcf38ULL;
-
-    uint64_t phys_end = 0;
-    uint64_t phys_text = virt2phys(text_v, &phys_end, dmap_base, cr3);
-    klog_printf("[CALL] DUMP_PHYS text_v=0x%llx -> phys=0x%llx sz=128\n",
-                (unsigned long long)text_v, (unsigned long long)phys_text);
-
-    if (phys_text != (uint64_t)-1 && cr3 && dmap_base) {
-        uint8_t text_code[128] = {0};
-        long r_phys = kekcall(KEKCALL_DUMP_PHYS, phys_text, (uintptr_t)text_code, 128);
-        klog_printf("[DUMP_PHYS] KEKCALL_DUMP_PHYS ret=%ld\n", r_phys);
-
-        klog_printf("[DUMP_PHYS] === 128 bytes of mp4_cdev_open (PHYS 0x%llx) ===\n",
-                    (unsigned long long)phys_text);
-        for (int b = 0; b < 128; b += 16) {
-            klog_printf("[DUMP_PHYS] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                        b,
-                        text_code[b+0], text_code[b+1], text_code[b+2], text_code[b+3],
-                        text_code[b+4], text_code[b+5], text_code[b+6], text_code[b+7],
-                        text_code[b+8], text_code[b+9], text_code[b+10], text_code[b+11],
-                        text_code[b+12], text_code[b+13], text_code[b+14], text_code[b+15]);
-        }
-    }
-
     /* Шаг 4: патчим все найденные mp4 cdevsw */
     for (int m = 0; m < mp4_count; m++) {
         uint64_t target_csw = mp4_parent_csws[m];
@@ -937,23 +893,32 @@ find_and_patch_mp4_cdevsw(void)
         }
     }
 
-    /* Шаг 5: open оба пути */
-    int fd1 = open("/dev/mp4/dump", 0x0002 /* O_RDWR */);
-    int err1 = errno;
-    klog_printf("[STEP5a] /dev/mp4/dump post-null-patch: fd=%d errno=%d\n", fd1, err1);
-    if (fd1 >= 0) {
-        klog_printf("[STEP5a] *** SUCCESS! /dev/mp4/dump OPENED! fd=%d ***\n", fd1);
-        probe_opened_mp4_fd(fd1, "/dev/mp4/dump");
-        close(fd1);
-    }
+    /* Шаг 5: Проверка всех целевых каналов (DECI + dump) */
+    const char *test_paths[] = {
+        "/dev/deci_mp4_ioc",
+        "/dev/deci_mp4_mmc",
+        "/dev/deci_coredump",
+        "/dev/mp4/dump_for_decid",
+        "/dev/mp4/dump"
+    };
 
-    int fd2 = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
-    int err2 = errno;
-    klog_printf("[STEP5b] /dev/mp4/dump_for_decid post-null-patch: fd=%d errno=%d\n", fd2, err2);
-    if (fd2 >= 0) {
-        klog_printf("[STEP5b] *** SUCCESS! /dev/mp4/dump_for_decid OPENED! fd=%d ***\n", fd2);
-        probe_opened_mp4_fd(fd2, "/dev/mp4/dump_for_decid");
-        close(fd2);
+    for (int p = 0; p < (int)(sizeof(test_paths)/sizeof(test_paths[0])); p++) {
+        const char *path = test_paths[p];
+        int fd = open(path, 0x0002 /* O_RDWR */);
+        int err = errno;
+        klog_printf("[PROBE_NODE] '%s' -> fd=%d errno=%d\n", path, fd, err);
+        if (fd < 0 && err == 1 /* EPERM */) {
+            /* Попробуем O_RDONLY */
+            fd = open(path, 0x0000 /* O_RDONLY */);
+            err = errno;
+            klog_printf("[PROBE_NODE] '%s' (RDONLY) -> fd=%d errno=%d\n", path, fd, err);
+        }
+
+        if (fd >= 0) {
+            klog_printf("[PROBE_NODE] *** SUCCESS! Opened '%s' with fd=%d! Starting deep probe... ***\n", path, fd);
+            probe_opened_mp4_fd(fd, path);
+            close(fd);
+        }
     }
 
     return 0;
