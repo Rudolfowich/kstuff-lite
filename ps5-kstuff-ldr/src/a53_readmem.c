@@ -60,7 +60,6 @@ a53_find_profile(uint32_t fw, uint32_t cond)
 #define KEKCALL_SCAN_XREF  20
 
 static uint64_t g_dump[64];
-static uint64_t g_xref[32];
 
 int
 probe_mp4_device(void)
