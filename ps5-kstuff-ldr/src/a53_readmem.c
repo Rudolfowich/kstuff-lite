@@ -864,19 +864,24 @@ find_and_patch_mp4_cdevsw(void)
     klog_printf("[DMAP] null_csw.d_name ptr = 0x%llx\n", (unsigned long long)null_dname_ptr);
 
     if (dmap_base && cr3 && null_dname_ptr) {
+        uint64_t vaddr_test = null_parent_csw; // .data vaddr
         uint64_t phys_end = 0;
-        uint64_t phys_rodata = virt2phys(null_dname_ptr, &phys_end, dmap_base, cr3);
-        klog_printf("[DMAP_SANITY] null_dname_ptr=0x%llx -> phys=0x%llx\n",
-                    (unsigned long long)null_dname_ptr, (unsigned long long)phys_rodata);
-        if (phys_rodata != (uint64_t)-1) {
-            uint64_t dmap_alias_rodata = dmap_base + phys_rodata;
-            char rodata_buf[16] = {0};
-            kekcall(KEKCALL_DUMP_MEM, dmap_alias_rodata, (uintptr_t)rodata_buf, 16);
-            klog_printf("[DMAP_SANITY] rodata via DMAP alias (0x%llx): '%s'\n",
-                        (unsigned long long)dmap_alias_rodata, rodata_buf);
+        uint64_t phys_test = virt2phys(vaddr_test, &phys_end, dmap_base, cr3);
+        klog_printf("[DMAP_SANITY] vaddr=0x%llx -> phys=0x%llx\n",
+                    (unsigned long long)vaddr_test, (unsigned long long)phys_test);
+        if (phys_test != (uint64_t)-1) {
+            uint64_t dmap_alias_test = dmap_base + phys_test;
+            uint8_t buf_direct[16] = {0};
+            uint8_t buf_dmap[16] = {0};
+            kekcall(KEKCALL_DUMP_MEM, vaddr_test, (uintptr_t)buf_direct, 16);
+            kekcall(KEKCALL_DUMP_MEM, dmap_alias_test, (uintptr_t)buf_dmap, 16);
 
-            if (strcmp(rodata_buf, "null") == 0) {
-                klog_printf("[DMAP_SANITY] *** BINGO! DMAP translation VERIFIED! ***\n");
+            int match = (memcmp(buf_direct, buf_dmap, 16) == 0);
+            klog_printf("[DMAP_SANITY] direct vs dmap match=%d (direct[0..7]=0x%lx, dmap[0..7]=0x%lx)\n",
+                        match, *(unsigned long*)buf_direct, *(unsigned long*)buf_dmap);
+
+            if (match) {
+                klog_printf("[DMAP_SANITY] *** BINGO! DMAP translation VERIFIED via memcmp! ***\n");
 
                 /* Извлекаем адрес оригинального mp4 d_open: d_close - 8 */
                 uint64_t mp4_csw0 = mp4_parent_csws[0];
@@ -908,9 +913,11 @@ find_and_patch_mp4_cdevsw(void)
                                     text_code[b+8], text_code[b+9], text_code[b+10], text_code[b+11],
                                     text_code[b+12], text_code[b+13], text_code[b+14], text_code[b+15]);
                     }
+                } else {
+                    klog_printf("[DMAP_TEXT] ERROR: virt2phys for orig_mp4_dopen returned -1!\n");
                 }
             } else {
-                klog_printf("[DMAP_SANITY] FAIL: rodata does not match 'null'! Aborting .text probe.\n");
+                klog_printf("[DMAP_SANITY] FAIL: direct and dmap buffers do not match! Aborting .text probe.\n");
             }
         }
     }
