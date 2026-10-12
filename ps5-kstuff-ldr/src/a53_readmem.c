@@ -369,7 +369,12 @@ walk_find_mp4_cdevsw(uint64_t curproc_hint)
             }
         }
 
-        if (kekcall(KEKCALL_DUMP_MEM, curr_proc, (uintptr_t)&curr_proc, 8) != 0) break;
+        uint64_t next_proc = 0;
+        kekcall(KEKCALL_DUMP_MEM, curr_proc + 0x00, (uintptr_t)&next_proc, 8);
+        if (!next_proc) {
+            kekcall(KEKCALL_DUMP_MEM, curr_proc + 0x08, (uintptr_t)&next_proc, 8);
+        }
+        curr_proc = next_proc;
     }
 
     klog_printf("[WALK] done, scanned %d procs, found %d mp4-related fds\n", proc_cnt, found);
