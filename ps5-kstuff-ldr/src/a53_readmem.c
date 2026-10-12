@@ -424,6 +424,7 @@ scan_cdevsw(void)
     int total_cdevsw = 0;
     uint64_t mp4_cdevsw_addr = 0;
     uint64_t mp4_d_open = 0;
+    (void)mp4_d_open;
 
     for (uint64_t va = data_start; va < data_end; va += 4096) {
         uint64_t buf64[512] = {0}; /* 4096 байт, выровнено на 8 */
