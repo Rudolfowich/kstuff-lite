@@ -282,8 +282,10 @@ walk_find_mp4_cdevsw(uint64_t curproc_hint)
         return -1;
     }
 
-    int found = 0;
+    int found = 0, printed = 0;
+    int proc_cnt = 0;
     for (int cnt = 0; cnt < 300 && curr_proc; cnt++) {
+        proc_cnt++;
         uint32_t pid = 0;
         char comm[32] = {0};
         uint64_t p_fd = 0;
@@ -293,65 +295,76 @@ walk_find_mp4_cdevsw(uint64_t curproc_hint)
         kekcall(KEKCALL_DUMP_MEM, curr_proc + 0x48, (uintptr_t)&p_fd, 8);
         comm[31] = 0;
 
+        uint32_t fd_nfiles = 0;
+        uint64_t fd_ofiles = 0;
         if (p_fd) {
-            uint64_t fd_ofiles = 0;
-            uint32_t fd_nfiles = 0;
             kekcall(KEKCALL_DUMP_MEM, p_fd + 0x08, (uintptr_t)&fd_ofiles, 8);
             kekcall(KEKCALL_DUMP_MEM, p_fd + 0x10, (uintptr_t)&fd_nfiles, 4);
+        }
 
-            if (fd_ofiles && fd_nfiles > 0 && fd_nfiles < 1000) {
-                for (uint32_t i = 0; i < fd_nfiles && i < 256; i++) {
-                    uint64_t file_ptr = 0;
-                    kekcall(KEKCALL_DUMP_MEM, fd_ofiles + i * 0x20,
-                            (uintptr_t)&file_ptr, 8);
-                    if (!file_ptr) continue;
+        if (printed < 10) {
+            klog_printf("[WALK] #%d proc=0x%llx pid=%u comm='%s' p_fd=0x%llx nfiles=%u\n",
+                        cnt, (unsigned long long)curr_proc,
+                        pid, comm, (unsigned long long)p_fd, fd_nfiles);
+            printed++;
+        }
 
-                    uint64_t f_data = 0;
-                    kekcall(KEKCALL_DUMP_MEM, file_ptr + 0x08,
-                            (uintptr_t)&f_data, 8);
-                    if (!f_data) continue;
+        if (p_fd && fd_ofiles && fd_nfiles > 0 && fd_nfiles < 1000) {
+            for (uint32_t i = 0; i < fd_nfiles && i < 256; i++) {
+                uint64_t file_ptr = 0;
+                kekcall(KEKCALL_DUMP_MEM, fd_ofiles + i * 0x20,
+                        (uintptr_t)&file_ptr, 8);
+                if (!file_ptr) continue;
 
-                    char si_name[64] = {0};
-                    if (kekcall(KEKCALL_DUMP_MEM, f_data + 0x98,
-                                (uintptr_t)si_name, 64) != 0) continue;
-                    si_name[63] = 0;
+                uint64_t f_data = 0;
+                kekcall(KEKCALL_DUMP_MEM, file_ptr + 0x08,
+                        (uintptr_t)&f_data, 8);
+                if (!f_data) continue;
 
-                    /* ЛЮБОЙ "mp4*" device */
-                    if (si_name[0]=='m' && si_name[1]=='p' && si_name[2]=='4')
-                    {
-                        /* ЗОЛОТО! Читаем si_devsw из cdev */
-                        uint64_t si_devsw = 0;
-                        kekcall(KEKCALL_DUMP_MEM, f_data + 0x70,
-                                (uintptr_t)&si_devsw, 8);
+                char si_name[64] = {0};
+                if (kekcall(KEKCALL_DUMP_MEM, f_data + 0x98,
+                            (uintptr_t)si_name, 64) != 0) continue;
+                si_name[63] = 0;
 
-                        klog_printf("[WALK] *** pid=%u (%s) fd=%u device='%s' cdev=0x%llx si_devsw=0x%llx ***\n",
-                                    pid, comm, i, si_name,
-                                    (unsigned long long)f_data,
-                                    (unsigned long long)si_devsw);
+                if (printed <= 3 && i < 3 && si_name[0] != 0) {
+                    klog_printf("[WALK]   fd %u device: '%s'\n", i, si_name);
+                }
 
-                        if (si_devsw) {
-                            /* Dump cdevsw структуру — тут d_open на offset +0x10 */
-                            uint8_t cdevsw_buf[128];
-                            if (kekcall(KEKCALL_DUMP_MEM, si_devsw,
-                                        (uintptr_t)cdevsw_buf, 128) == 0) {
-                                klog_printf("[WALK] cdevsw @ 0x%llx dump:\n",
-                                            (unsigned long long)si_devsw);
-                                for (int b = 0; b < 128; b += 16) {
-                                    klog_printf("[WALK]   +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                                        b, cdevsw_buf[b], cdevsw_buf[b+1], cdevsw_buf[b+2], cdevsw_buf[b+3],
-                                        cdevsw_buf[b+4], cdevsw_buf[b+5], cdevsw_buf[b+6], cdevsw_buf[b+7],
-                                        cdevsw_buf[b+8], cdevsw_buf[b+9], cdevsw_buf[b+10], cdevsw_buf[b+11],
-                                        cdevsw_buf[b+12], cdevsw_buf[b+13], cdevsw_buf[b+14], cdevsw_buf[b+15]);
-                                }
-                                /* d_open = +0x10 */
-                                uint64_t d_open = 0;
-                                __builtin_memcpy(&d_open, cdevsw_buf + 0x10, 8);
-                                klog_printf("[WALK]   >>> d_open = 0x%llx (mp4_cdev_open!) <<<\n",
-                                            (unsigned long long)d_open);
+                /* ЛЮБОЙ "mp4*" device */
+                if (si_name[0]=='m' && si_name[1]=='p' && si_name[2]=='4')
+                {
+                    /* ЗОЛОТО! Читаем si_devsw из cdev */
+                    uint64_t si_devsw = 0;
+                    kekcall(KEKCALL_DUMP_MEM, f_data + 0x70,
+                            (uintptr_t)&si_devsw, 8);
+
+                    klog_printf("[WALK] *** pid=%u (%s) fd=%u device='%s' cdev=0x%llx si_devsw=0x%llx ***\n",
+                                pid, comm, i, si_name,
+                                (unsigned long long)f_data,
+                                (unsigned long long)si_devsw);
+
+                    if (si_devsw) {
+                        /* Dump cdevsw структуру — тут d_open на offset +0x10 */
+                        uint8_t cdevsw_buf[128];
+                        if (kekcall(KEKCALL_DUMP_MEM, si_devsw,
+                                    (uintptr_t)cdevsw_buf, 128) == 0) {
+                            klog_printf("[WALK] cdevsw @ 0x%llx dump:\n",
+                                        (unsigned long long)si_devsw);
+                            for (int b = 0; b < 128; b += 16) {
+                                klog_printf("[WALK]   +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                    b, cdevsw_buf[b], cdevsw_buf[b+1], cdevsw_buf[b+2], cdevsw_buf[b+3],
+                                    cdevsw_buf[b+4], cdevsw_buf[b+5], cdevsw_buf[b+6], cdevsw_buf[b+7],
+                                    cdevsw_buf[b+8], cdevsw_buf[b+9], cdevsw_buf[b+10], cdevsw_buf[b+11],
+                                    cdevsw_buf[b+12], cdevsw_buf[b+13], cdevsw_buf[b+14], cdevsw_buf[b+15]);
                             }
+                            /* d_open = +0x10 */
+                            uint64_t d_open = 0;
+                            __builtin_memcpy(&d_open, cdevsw_buf + 0x10, 8);
+                            klog_printf("[WALK]   >>> d_open = 0x%llx (mp4_cdev_open!) <<<\n",
+                                        (unsigned long long)d_open);
                         }
-                        found++;
                     }
+                    found++;
                 }
             }
         }
@@ -359,7 +372,7 @@ walk_find_mp4_cdevsw(uint64_t curproc_hint)
         if (kekcall(KEKCALL_DUMP_MEM, curr_proc, (uintptr_t)&curr_proc, 8) != 0) break;
     }
 
-    klog_printf("[WALK] done, found %d mp4-related fds\n", found);
+    klog_printf("[WALK] done, scanned %d procs, found %d mp4-related fds\n", proc_cnt, found);
     return 0;
 }
 
