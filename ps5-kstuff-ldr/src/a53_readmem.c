@@ -698,21 +698,6 @@ find_and_patch_mp4_cdevsw(void)
                     (unsigned long long)mp4_parent_csw, (unsigned long long)mp4_d_open_func,
                     (unsigned long long)mp4_d_close_func);
 
-        /* Дамп 32 байт машинного кода d_open и d_close */
-        uint8_t d_open_code[32] = {0};
-        uint8_t d_close_code[32] = {0};
-        kekcall(KEKCALL_DUMP_MEM, mp4_d_open_func, (uintptr_t)d_open_code, 32);
-        kekcall(KEKCALL_DUMP_MEM, mp4_d_close_func, (uintptr_t)d_close_code, 32);
-
-        klog_printf("[DISASM] d_open @ 0x%llx: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                    (unsigned long long)mp4_d_open_func,
-                    d_open_code[0], d_open_code[1], d_open_code[2], d_open_code[3],
-                    d_open_code[4], d_open_code[5], d_open_code[6], d_open_code[7]);
-        klog_printf("[DISASM] d_close @ 0x%llx: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                    (unsigned long long)mp4_d_close_func,
-                    d_close_code[0], d_close_code[1], d_close_code[2], d_close_code[3],
-                    d_close_code[4], d_close_code[5], d_close_code[6], d_close_code[7]);
-
         /* Прямой патч d_open через KEKCALL_WRITE64 (kekcall 27) на адрес d_close (+0x20) */
         klog_printf("[PATCH] writing d_open via KEKCALL_WRITE64(27) to csw+0x10 (0x%llx) val=d_close (0x%llx)...\n",
                     (unsigned long long)(mp4_parent_csw + 0x10ULL), (unsigned long long)mp4_d_close_func);
@@ -728,13 +713,37 @@ find_and_patch_mp4_cdevsw(void)
                     (unsigned long long)mp4_d_close_func);
 
         if (readback == mp4_d_close_func) {
-            klog_printf("[PATCH] *** BINGO! d_open PATCHED TO d_close! Calling open now... ***\n");
+            klog_printf("[PATCH] *** BINGO! d_open PATCHED TO d_close! Running VFS probes... ***\n");
+
+            /* Тест 1: post-patch open основного пути */
             int pfd = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
             int perr = errno;
-            klog_printf("[PATCH] post-patch open result: fd=%d errno=%d\n", pfd, perr);
+            klog_printf("[TEST_VFS] open('/dev/mp4/dump_for_decid'): fd=%d errno=%d\n", pfd, perr);
             if (pfd >= 0) {
                 klog_printf("[PATCH] *** SUCCESS! /dev/mp4/dump_for_decid OPENED! fd=%d ***\n", pfd);
                 close(pfd);
+            }
+
+            /* Тест 2: проверка директории /dev/mp4 */
+            int dfd = open("/dev/mp4", 0x0000 /* O_RDONLY */);
+            int derr = errno;
+            klog_printf("[TEST_VFS] open('/dev/mp4'): fd=%d errno=%d\n", dfd, derr);
+            if (dfd >= 0) close(dfd);
+
+            /* Тест 3: проверка DECI-нод из walk (#50, #51, #52) */
+            const char *deci_nodes[] = {
+                "/dev/deci_mp4_ioc",
+                "/dev/deci_mp4_mmc",
+                "/dev/deci_coredump"
+            };
+            for (int ni = 0; ni < 3; ni++) {
+                int nfd = open(deci_nodes[ni], 0x0002 /* O_RDWR */);
+                int nerr = errno;
+                klog_printf("[TEST_VFS] open('%s'): fd=%d errno=%d\n", deci_nodes[ni], nfd, nerr);
+                if (nfd >= 0) {
+                    klog_printf("[TEST_VFS] *** SUCCESS! DECI NODE %s OPENED! fd=%d ***\n", deci_nodes[ni], nfd);
+                    close(nfd);
+                }
             }
         }
     } else {
