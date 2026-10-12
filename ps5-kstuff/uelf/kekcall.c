@@ -822,6 +822,62 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = nbytes;
         return 0;
     }
+    else if(nr == 29)
+    {
+        /* ENUM_ALLPROC: walk allproc in kernel space safely and return array of:
+         * struct { uint32_t pid; char comm[24]; uint64_t ucred; uint64_t authid; } (48 bytes each)
+         * args[RDI] = user_buf
+         * args[RSI] = max_entries */
+        uint64_t user_buf = args[RDI];
+        uint32_t max_entries = (uint32_t)args[RSI];
+        if (!user_buf || max_entries == 0) return EINVAL;
+        if (max_entries > 256) max_entries = 256;
+
+        extern char allproc[];
+        uint64_t p = 0;
+        kpeek64_checked((uint64_t)allproc, &p);
+
+        uint32_t count = 0;
+        unsigned safety = 0;
+        while (p && count < max_entries && safety++ < 600) {
+            uint64_t pid_u64_bc = 0, pid_u64_2c0 = 0;
+            kpeek64_checked(p + 0xBC, &pid_u64_bc);
+            kpeek64_checked(p + 0x2C0, &pid_u64_2c0);
+            uint32_t pid = (uint32_t)(pid_u64_bc & 0xFFFFFFFF);
+            if (!pid) pid = (uint32_t)(pid_u64_2c0 & 0xFFFFFFFF);
+
+            char comm[24] = {0};
+            copy_from_kernel_raw(comm, p + 0x448, 20);
+            if (!comm[0]) copy_from_kernel_raw(comm, p + 0x44C, 20);
+
+            uint64_t ucred = 0;
+            kpeek64_checked(p + 0x40, &ucred);
+            if (!ucred) kpeek64_checked(p + 0x48, &ucred);
+
+            uint64_t authid = 0;
+            if (ucred) kpeek64_checked(ucred + 0x58, &authid);
+
+            /* Pack struct: pid(4), comm(24), ucred(8), authid(8) = 44 bytes -> 48 bytes with pad */
+            uint8_t entry[48] = {0};
+            *(uint32_t*)(entry + 0) = pid;
+            __builtin_memcpy(entry + 4, comm, 24);
+            *(uint64_t*)(entry + 28) = ucred;
+            *(uint64_t*)(entry + 36) = authid;
+
+            if (copy_to_kernel(user_buf + (uint64_t)count * 48, entry, 48) != 0)
+                break;
+
+            count++;
+
+            uint64_t next = 0;
+            kpeek64_checked(p, &next);
+            if (!next) kpeek64_checked(p + 0x10, &next);
+            p = next;
+        }
+
+        args[RAX] = count;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;

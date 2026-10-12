@@ -23,6 +23,7 @@
 #define KEKCALL_SCAN_CDEVSW       26
 #define KEKCALL_WRITE64           27
 #define KEKCALL_DUMP_PHYS         28
+#define KEKCALL_ENUM_ALLPROC      29
 
 static inline long
 kekcall(uint32_t nr, uint64_t a1, uint64_t a2, uint64_t a3)
