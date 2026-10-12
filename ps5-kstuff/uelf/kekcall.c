@@ -451,10 +451,10 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         uint64_t finds[32] = {0};
         unsigned nfound = 0;
 
-        #define CHUNK 0x1000
+        #define CHUNK 128
         uint8_t buf[CHUNK];
 
-        for (uint64_t off = 0; off + 8 < scan_bytes && nfound < 32; off += CHUNK - 8) {
+        for (uint64_t off = 0; off + 8 < scan_bytes && nfound < 32; off += (CHUNK - 8)) {
             if (copy_from_kernel(buf, kbase + off, CHUNK) != 0) continue;
             for (unsigned i = 0; i + 8 <= CHUNK; i++) {
                 uint64_t v;
