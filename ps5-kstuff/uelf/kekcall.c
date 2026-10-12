@@ -488,9 +488,11 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         uint64_t user_buf = args[RSI];
         if (!target || !user_buf) return 1;
 
-        uint64_t base = (target - 256) & ~7ULL;
+        uint64_t base = target & ~7ULL;
         uint64_t data[64] = {0};
-        copy_from_kernel(data, base, sizeof(data));
+        for (int i = 0; i < 64; i++) {
+            kpeek64_checked(base + i*8, &data[i]);
+        }
 
         if (copy_to_kernel(user_buf, data, sizeof(data)) != 0)
             return EFAULT;

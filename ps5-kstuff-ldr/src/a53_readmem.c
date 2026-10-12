@@ -91,8 +91,8 @@ probe_mp4_device(void)
                 if (asc[c] < 32 || asc[c] > 126) asc[c] = '.';
             }
             klog_printf("[a53]   [%2d] 0x%016llx '%s' (0x%llx)\n",
-                        i - 32, (unsigned long long)g_dump[i], asc,
-                        (unsigned long long)(((str_addrs[a] - 256) & ~7ULL) + i*8));
+                        i, (unsigned long long)g_dump[i], asc,
+                        (unsigned long long)((str_addrs[a] & ~7ULL) + i*8));
         }
     }
 
