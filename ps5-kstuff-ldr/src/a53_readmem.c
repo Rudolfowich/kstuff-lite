@@ -726,23 +726,14 @@ find_and_patch_mp4_cdevsw(void)
             close(cfd);
         }
 
-        /* 3. Тест прямой записи d_open через kekcall(2) (copyin в ядро) */
+        /* 3. Запись d_open через KEKCALL_WRITE64 (kekcall 27) */
         uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
         uint64_t justreturn_addr = kbase - 0xA686F0ULL;
-        klog_printf("[PATCH] testing kernel write via kekcall(2) to csw+0x10 (0x%llx)...\n",
-                    (unsigned long long)(mp4_parent_csw + 0x10ULL));
+        klog_printf("[PATCH] writing d_open via KEKCALL_WRITE64(27) to csw+0x10 (0x%llx) val=0x%llx...\n",
+                    (unsigned long long)(mp4_parent_csw + 0x10ULL), (unsigned long long)justreturn_addr);
 
-        /* Формируем 48-байтный буфер с justreturn_addr на смещении 0 */
-        uint64_t patch_payload[6] = {
-            justreturn_addr,
-            0, /* d_fdopen */
-            mp4_d_open_func + 8, /* d_close */
-            0, 0, 0
-        };
-
-        /* kekcall(2, target_kaddr, ...) */
-        long wr_ret = kekcall(2, mp4_parent_csw + 0x10ULL, (uintptr_t)patch_payload, 0);
-        klog_printf("[PATCH] kekcall(2) returned %ld\n", wr_ret);
+        long wr_ret = kekcall(27, mp4_parent_csw + 0x10ULL, justreturn_addr, 0);
+        klog_printf("[PATCH] KEKCALL_WRITE64 returned %ld\n", wr_ret);
 
         /* Проверяем, изменился ли d_open */
         uint64_t readback = 0;

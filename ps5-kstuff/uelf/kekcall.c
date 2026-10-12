@@ -784,6 +784,25 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = matched_cdevsw;
         return 0;
     }
+    else if(nr == 27)
+    {
+        /* WRITE64: atomic write 64-bit value to kernel memory with safety checks
+         * args[RDI] = target kernel address
+         * args[RSI] = value to write
+         * return: 0 on success, EFAULT if address invalid */
+        uint64_t target = args[RDI];
+        uint64_t val = args[RSI];
+        if (!target || (target & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL)
+            return EFAULT;
+
+        uint64_t test_v = 0;
+        if (kpeek64_checked(target, &test_v) != 0)
+            return EFAULT;
+
+        kpoke64(target, val);
+        args[RAX] = 0;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;
