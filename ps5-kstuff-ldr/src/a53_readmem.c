@@ -257,20 +257,28 @@ test_mp4_open_with_root(void)
 }
 
 int
-walk_find_mp4_cdevsw(void)
+walk_find_mp4_cdevsw(uint64_t curproc_hint)
 {
     /* allproc получаем через KEKCALL_GET_KBASE */
     uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
-    /* allproc на 13.60 находится по kbase + 0x28C9E80 (0xceab9e80 - 0xcc1f0000 = 0x28C9E80) */
     uint64_t allproc_addr = kbase + 0x28C9E80ULL;
 
-    klog_printf("[WALK] kbase=0x%llx, allproc=0x%llx\n",
+    klog_printf("[WALK] kbase=0x%llx, allproc=0x%llx, curproc_hint=0x%llx\n",
                 (unsigned long long)kbase,
-                (unsigned long long)allproc_addr);
+                (unsigned long long)allproc_addr,
+                (unsigned long long)curproc_hint);
 
     uint64_t curr_proc = 0;
-    if (kekcall(KEKCALL_DUMP_MEM, allproc_addr, (uintptr_t)&curr_proc, 8) != 0 || !curr_proc) {
-        klog_printf("[WALK] can't read allproc @ 0x%llx\n", (unsigned long long)allproc_addr);
+    long r = kekcall(KEKCALL_DUMP_MEM, allproc_addr, (uintptr_t)&curr_proc, 8);
+    klog_printf("[WALK] read allproc ret=%ld, val=0x%llx\n", r, (unsigned long long)curr_proc);
+
+    if (!curr_proc && curproc_hint) {
+        klog_printf("[WALK] using curproc_hint 0x%llx as start point!\n", (unsigned long long)curproc_hint);
+        curr_proc = curproc_hint;
+    }
+
+    if (!curr_proc) {
+        klog_printf("[WALK] no starting proc found, abort\n");
         return -1;
     }
 
@@ -356,10 +364,10 @@ walk_find_mp4_cdevsw(void)
 }
 
 int
-probe_mp4_device(void)
+probe_mp4_device(uint64_t curproc_hint)
 {
     test_mp4_open_with_root();
-    walk_find_mp4_cdevsw();
+    walk_find_mp4_cdevsw(curproc_hint);
     return 0;
 }
 
@@ -409,7 +417,8 @@ install_ppr_a53(uint32_t system_fw_version)
     }
 
     /* Device probe (runs xref_scan_text) */
-    if (probe_mp4_device() != 0) {
+    uint64_t curproc_hint = (rc > 38) ? ext_buf[38] : 0;
+    if (probe_mp4_device(curproc_hint) != 0) {
         klog_puts("[a53] MP4 device not accessible — abort\n");
         return -2;
     }
