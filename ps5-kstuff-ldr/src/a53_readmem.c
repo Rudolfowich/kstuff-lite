@@ -73,9 +73,14 @@ probe_mp4_device(void)
         klog_printf("[a53] === dump around 0x%llx ===\n", (unsigned long long)str_addrs[a]);
         kekcall(KEKCALL_DUMP_MEM, str_addrs[a], (uintptr_t)g_dump, 0);
         for (int i = 0; i < 64; i++) {
-            klog_printf("[a53]   [%2d] 0x%016llx (addr=0x%llx)\n",
-                        i - 32, (unsigned long long)g_dump[i],
-                        (unsigned long long)(str_addrs[a] - 256 + i*8));
+            char asc[9] = {0};
+            memcpy(asc, &g_dump[i], 8);
+            for (int c = 0; c < 8; c++) {
+                if (asc[c] < 32 || asc[c] > 126) asc[c] = '.';
+            }
+            klog_printf("[a53]   [%2d] 0x%016llx '%s' (0x%llx)\n",
+                        i - 32, (unsigned long long)g_dump[i], asc,
+                        (unsigned long long)(((str_addrs[a] - 256) & ~7ULL) + i*8));
         }
     }
 
