@@ -568,6 +568,69 @@ scan_cdevsw(void)
     return 0;
 }
 
+static void
+probe_opened_mp4_fd(int fd, const char *name)
+{
+    klog_printf("[PROBE] === Starting read & ioctl probe on %s (fd=%d) ===\n", name, fd);
+
+    /* 1. Безопасный read(fd, buf, 4096) */
+    uint8_t rbuf[4096] = {0};
+    ssize_t nread = read(fd, rbuf, sizeof(rbuf));
+    int rerr = errno;
+    klog_printf("[PROBE_READ] read(%s, 4096): n=%ld errno=%d\n", name, (long)nread, rerr);
+    if (nread > 0) {
+        klog_printf("[PROBE_READ] read %ld bytes! Hex dump of first 64 bytes:\n", (long)nread);
+        for (int r = 0; r < 64 && r < nread; r += 16) {
+            klog_printf("[PROBE_READ] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                        r,
+                        rbuf[r+0], rbuf[r+1], rbuf[r+2], rbuf[r+3], rbuf[r+4], rbuf[r+5], rbuf[r+6], rbuf[r+7],
+                        rbuf[r+8], rbuf[r+9], rbuf[r+10], rbuf[r+11], rbuf[r+12], rbuf[r+13], rbuf[r+14], rbuf[r+15]);
+        }
+    }
+
+    /* 2. ioctl brute-force по группам 'A'-'Z' и 'a'-'z' (номера 0-15) */
+    klog_printf("[PROBE_IOCTL] starting ioctl sweep on %s...\n", name);
+    int non_enotty_count = 0;
+    const char groups[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    for (size_t gi = 0; gi < sizeof(groups) - 1; gi++) {
+        char grp = groups[gi];
+        for (int num = 0; num < 16; num++) {
+            /* _IOR(grp, num, uint64_t) */
+            uint64_t arg_r = 0;
+            unsigned long cmd_ior = _IOR(grp, num, uint64_t);
+            int rc_r = ioctl(fd, cmd_ior, &arg_r);
+            int err_r = errno;
+            if (rc_r == 0 || err_r != 25 /* ENOTTY */) {
+                klog_printf("[PROBE_IOCTL] %s _IOR('%c', %d) [0x%08lx]: rc=%d errno=%d arg=0x%llx\n",
+                            name, grp, num, cmd_ior, rc_r, err_r, (unsigned long long)arg_r);
+                non_enotty_count++;
+            }
+
+            /* _IO(grp, num) */
+            unsigned long cmd_io = _IO(grp, num);
+            int rc_io = ioctl(fd, cmd_io, 0);
+            int err_io = errno;
+            if (rc_io == 0 || err_io != 25 /* ENOTTY */) {
+                klog_printf("[PROBE_IOCTL] %s _IO('%c', %d) [0x%08lx]: rc=%d errno=%d\n",
+                            name, grp, num, cmd_io, rc_io, err_io);
+                non_enotty_count++;
+            }
+
+            /* _IOWR(grp, num, uint64_t) */
+            uint64_t arg_wr = 0;
+            unsigned long cmd_iowr = _IOWR(grp, num, uint64_t);
+            int rc_wr = ioctl(fd, cmd_iowr, &arg_wr);
+            int err_wr = errno;
+            if (rc_wr == 0 || err_wr != 25 /* ENOTTY */) {
+                klog_printf("[PROBE_IOCTL] %s _IOWR('%c', %d) [0x%08lx]: rc=%d errno=%d arg=0x%llx\n",
+                            name, grp, num, cmd_iowr, rc_wr, err_wr, (unsigned long long)arg_wr);
+                non_enotty_count++;
+            }
+        }
+    }
+    klog_printf("[PROBE_IOCTL] sweep on %s complete: %d non-ENOTTY responses.\n", name, non_enotty_count);
+}
+
 /* Полноценный полный обход d_devs для каждого найденного cdevsw БЕЗ прерываний */
 int
 find_and_patch_mp4_cdevsw(void)
@@ -750,6 +813,7 @@ find_and_patch_mp4_cdevsw(void)
     klog_printf("[STEP5a] /dev/mp4/dump post-null-patch: fd=%d errno=%d\n", fd1, err1);
     if (fd1 >= 0) {
         klog_printf("[STEP5a] *** SUCCESS! /dev/mp4/dump OPENED! fd=%d ***\n", fd1);
+        probe_opened_mp4_fd(fd1, "/dev/mp4/dump");
         close(fd1);
     }
 
@@ -758,6 +822,7 @@ find_and_patch_mp4_cdevsw(void)
     klog_printf("[STEP5b] /dev/mp4/dump_for_decid post-null-patch: fd=%d errno=%d\n", fd2, err2);
     if (fd2 >= 0) {
         klog_printf("[STEP5b] *** SUCCESS! /dev/mp4/dump_for_decid OPENED! fd=%d ***\n", fd2);
+        probe_opened_mp4_fd(fd2, "/dev/mp4/dump_for_decid");
         close(fd2);
     }
 
