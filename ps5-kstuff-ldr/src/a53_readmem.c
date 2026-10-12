@@ -60,45 +60,55 @@ a53_find_profile(uint32_t fw, uint32_t cond)
 #define KEKCALL_SCAN_XREF  20
 
 static uint64_t g_dump[64];
+static uint64_t g_finds[32];
 
 int
 probe_mp4_device(void)
 {
-    uint64_t heap_base = 0xfffffc7400000000ULL;
-    uint64_t finds[32] = {0};
+    for (int i = 0; i < 32; i++) g_finds[i] = 0;
 
-    klog_printf("[a53] scanning 32MB kernel heap starting at 0x%016llx for \"mp4/dump\" ...\n",
-                (unsigned long long)heap_base);
-    long nfound = kekcall(KEKCALL_SCAN_DMEM, 32, (uintptr_t)finds, heap_base);
-    klog_printf("[a53] heap scan returned: total=%ld\n", nfound);
-
-    for (int i = 0; i < 32 && i < nfound; i++) {
-        klog_printf("[a53]   heap_found[%d] = 0x%016llx\n", i, (unsigned long long)finds[i]);
+    klog_puts("[a53] scanning heap 0xffffaeda00000000..+64MB for \"mp4/dump\" ...\n");
+    long nfound = kekcall(KEKCALL_SCAN_DMEM,
+                          64 /* MB */,
+                          (uintptr_t)g_finds,
+                          0xffffaeda00000000ULL /* heap start из текущего dump */);
+    klog_printf("[a53] heap scan: total=%ld\n", nfound);
+    for (int i = 0; i < 32; i++) {
+        klog_printf("[a53]   heap_finds[%2d] = 0x%016llx\n", i, (unsigned long long)g_finds[i]);
     }
 
-    if (nfound <= 0 || !finds[0]) {
-        klog_puts("[a53] no \"mp4/dump\" found in heap\n");
-        return -1;
-    }
-
-    int count = (nfound > 4) ? 4 : (int)nfound;
-    for (int a = 0; a < count; a++) {
-        for (int i = 0; i < 64; i++) g_dump[i] = 0;
-        klog_printf("[a53] === dump around heap addr 0x%llx ===\n", (unsigned long long)finds[a]);
-        kekcall(KEKCALL_DUMP_MEM, finds[a], (uintptr_t)g_dump, 0);
-        for (int i = 0; i < 64; i++) {
-            char asc[9] = {0};
-            memcpy(asc, &g_dump[i], 8);
-            for (int c = 0; c < 8; c++) {
-                if (asc[c] < 32 || asc[c] > 126) asc[c] = '.';
-            }
-            klog_printf("[a53]   [%2d] 0x%016llx '%s' (0x%llx)\n",
-                        i, (unsigned long long)g_dump[i], asc,
-                        (unsigned long long)((finds[a] & ~7ULL) - 256 + i*8));
+    /* Если не нашлось — попробуем второй heap range */
+    if (nfound == 0) {
+        for (int i = 0; i < 32; i++) g_finds[i] = 0;
+        klog_puts("[a53] trying 0xffffaee200000000..+64MB ...\n");
+        nfound = kekcall(KEKCALL_SCAN_DMEM, 64, (uintptr_t)g_finds, 0xffffaee200000000ULL);
+        klog_printf("[a53] heap scan 2: total=%ld\n", nfound);
+        for (int i = 0; i < 32; i++) {
+            klog_printf("[a53]   heap_finds2[%2d] = 0x%016llx\n", i, (unsigned long long)g_finds[i]);
         }
     }
 
-    return 0;
+    if (nfound > 0) {
+        int count = (nfound > 4) ? 4 : (int)nfound;
+        for (int a = 0; a < count; a++) {
+            if (!g_finds[a]) continue;
+            for (int i = 0; i < 64; i++) g_dump[i] = 0;
+            klog_printf("[a53] === dump around heap addr 0x%llx ===\n", (unsigned long long)g_finds[a]);
+            kekcall(KEKCALL_DUMP_MEM, g_finds[a], (uintptr_t)g_dump, 0);
+            for (int i = 0; i < 64; i++) {
+                char asc[9] = {0};
+                memcpy(asc, &g_dump[i], 8);
+                for (int c = 0; c < 8; c++) {
+                    if (asc[c] < 32 || asc[c] > 126) asc[c] = '.';
+                }
+                klog_printf("[a53]   [%2d] 0x%016llx '%s' (0x%llx)\n",
+                            i, (unsigned long long)g_dump[i], asc,
+                            (unsigned long long)((g_finds[a] & ~7ULL) - 256 + i*8));
+            }
+        }
+    }
+
+    return (nfound > 0) ? 0 : -1;
 }
 
 /* ---- Main install entry --------------------------------------------- */
