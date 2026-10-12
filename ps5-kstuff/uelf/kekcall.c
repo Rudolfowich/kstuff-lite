@@ -360,6 +360,76 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = 0;
         return 0;
     }
+    else if(nr == 16)
+    {
+        /* SWAP_FULL_FROM_PID: td_ucred + p_ucred + p_fd от target_pid.
+         * args[RDI] = target_pid (uint32_t)
+         * args[RSI] = user_buf  (32 байта backup: backup[0..2])
+         * regs[RDI] = curthread */
+        uint32_t target_pid = (uint32_t)args[RDI];
+        uint64_t user_buf   = args[RSI];
+        uint64_t td         = regs[RDI];
+        uint64_t proc       = 0;
+        kpeek64_checked(td + 0x08, &proc);
+
+        extern char allproc[];
+        uint64_t p = 0;
+        kpeek64_checked((uint64_t)allproc, &p);
+
+        uint64_t t_ucred = 0, t_fd = 0;
+        unsigned safety = 0;
+        while (p && safety++ < 500) {
+            uint64_t pid_u64 = 0;
+            kpeek64_checked(p + 0xb8, &pid_u64);
+            /* p_pid is int32 in low 32 bits on PS5 */
+            if ((uint32_t)(pid_u64 & 0xFFFFFFFF) == target_pid) {
+                kpeek64_checked(p + 0x40, &t_ucred);
+                kpeek64_checked(p + 0x60, &t_fd);
+                break;
+            }
+            uint64_t next = 0;
+            kpeek64_checked(p, &next);
+            p = next;
+        }
+        if (!t_ucred || !t_fd) return 2;
+
+        uint64_t backup[4] = {0};
+        kpeek64_checked(td + 0x140,  &backup[0]);   /* old td_ucred */
+        kpeek64_checked(proc + 0x40, &backup[1]);   /* old p_ucred */
+        kpeek64_checked(proc + 0x60, &backup[2]);   /* old p_fd */
+        backup[3] = 0;
+        if (user_buf) {
+            if (copy_to_kernel(user_buf, backup, sizeof(backup)))
+                return EFAULT;
+        }
+
+        kpoke64(td + 0x140,  t_ucred);
+        kpoke64(proc + 0x40, t_ucred);
+        kpoke64(proc + 0x60, t_fd);
+        args[RAX] = 0;
+        return 0;
+    }
+    else if(nr == 17)
+    {
+        /* RESTORE_FULL: восстановить td_ucred + p_ucred + p_fd из user_buf.
+         * args[RSI] = user_buf (32 байта)
+         * regs[RDI] = curthread */
+        uint64_t td       = regs[RDI];
+        uint64_t proc     = 0;
+        kpeek64_checked(td + 0x08, &proc);
+        uint64_t user_buf = args[RSI];
+        if (!user_buf) return 1;
+
+        uint64_t backup[4] = {0};
+        if (copy_from_kernel(backup, user_buf, sizeof(backup)))
+            return EFAULT;
+
+        kpoke64(td + 0x140,  backup[0]);
+        kpoke64(proc + 0x40, backup[1]);
+        kpoke64(proc + 0x60, backup[2]);
+        args[RAX] = 0;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;

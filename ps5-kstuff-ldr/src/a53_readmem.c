@@ -59,18 +59,14 @@ a53_find_profile(uint32_t fw, uint32_t cond)
 int
 probe_mp4_device(void)
 {
-    klog_puts("[a53] brute-force: searching pid 1..255 that can open /dev/mp4/dump ...\n");
-    int winners[16] = {0};
-    int win_count = 0;
+    klog_puts("[a53] brute-force FULL swap (ucred+p_ucred+p_fd) pid 1..255 ...\n");
 
-    for (int pid = 1; pid < 256 && win_count < 16; pid++) {
-        uint64_t backup = 0;
-        /* args: kekcall(14, target_pid, &backup, 0)
-         * UELF: args[RDI]=target_pid, args[RSI]=&backup */
-        long r = kekcall(KEKCALL_SWAP_UCRED_PID, (uint64_t)pid,
-                         (uintptr_t)&backup, 0);
+    for (int pid = 1; pid < 256; pid++) {
+        uint64_t backup[4] = {0};
+        long r = kekcall(KEKCALL_SWAP_FULL, (uint64_t)pid,
+                         (uintptr_t)backup, 0);
         if (r != 0) {
-            /* pid not in allproc (r=2) or other error — skip silently */
+            /* pid not found or t_fd==NULL — skip */
             continue;
         }
 
@@ -78,26 +74,18 @@ probe_mp4_device(void)
         int saved_errno = errno;
 
         /* Always restore immediately */
-        kekcall(KEKCALL_RESTORE_UCRED_PTR, 0, (uintptr_t)&backup, 0);
+        kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)backup, 0);
 
         if (fd >= 0) {
             close(fd);
-            winners[win_count++] = pid;
-            klog_printf("[a53] ★ pid=%d (0x%x) CAN open /dev/mp4/dump\n",
-                        pid, pid);
-        } else {
-            klog_printf("[a53] pid=%d errno=%d\n", pid, saved_errno);
+            klog_printf("[a53] ★ pid=%d FULL swap OPENS /dev/mp4/dump ★\n", pid);
+            return 0;
         }
+        klog_printf("[a53] pid=%d errno=%d\n", pid, saved_errno);
     }
 
-    if (win_count == 0) {
-        klog_puts("[a53] NO pid 1..255 could open — check not ucred-based, need driver patch\n");
-        return -1;
-    }
-
-    klog_printf("[a53] found %d winner(s). First winner pid=%d\n",
-                win_count, winners[0]);
-    return 0;
+    klog_puts("[a53] FULL swap also failed — need to patch mp4_cdev_open directly\n");
+    return -1;
 }
 
 /* ---- Main install entry --------------------------------------------- */
