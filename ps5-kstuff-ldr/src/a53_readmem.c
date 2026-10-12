@@ -381,10 +381,77 @@ walk_find_mp4_cdevsw(uint64_t curproc_hint)
 }
 
 int
+scan_cdevsw(void)
+{
+    uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+    uint32_t D_VER_FREEBSD9 = 0x17122009;
+    uint32_t D_VER_FREEBSD5 = 0x20011966;
+
+    klog_printf("[CDVS] scan .data for D_VERSION (0x%08x or 0x%08x) from kbase=0x%llx\n",
+                D_VER_FREEBSD9, D_VER_FREEBSD5, (unsigned long long)kbase);
+
+    int found = 0;
+    for (uint64_t off = 0; off < 32 * 1024 * 1024; off += 4096) {
+        uint8_t buf[4096];
+        if (kekcall(KEKCALL_DUMP_MEM, kbase + off, (uintptr_t)buf, 4096) != 0)
+            continue;
+
+        for (int i = 0; i + 32 <= 4096; i += 8) {
+            uint32_t ver;
+            __builtin_memcpy(&ver, buf + i, 4);
+            if (ver != D_VER_FREEBSD9 && ver != D_VER_FREEBSD5)
+                continue;
+
+            uint64_t cdevsw_addr = kbase + off + i;
+            uint64_t d_name_ptr = 0;
+            __builtin_memcpy(&d_name_ptr, buf + i + 8, 8);
+            if (!d_name_ptr)
+                continue;
+            if ((d_name_ptr & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL)
+                continue;
+
+            char name[32];
+            uint64_t name_tmp[4] = {0};  /* buffer выровнен на 8 для KEKCALL_DUMP_MEM */
+            if (kekcall(KEKCALL_DUMP_MEM, d_name_ptr, (uintptr_t)name_tmp, 32) != 0)
+                continue;
+            __builtin_memcpy(name, name_tmp, 32);
+            name[31] = 0;
+            if (name[0] < 32 || name[0] > 126)
+                continue;
+
+            uint64_t d_open = 0;
+            __builtin_memcpy(&d_open, buf + i + 0x10, 8);
+
+            klog_printf("[CDVS] @ 0x%llx ver=0x%08x name='%s' d_open=0x%llx\n",
+                        (unsigned long long)cdevsw_addr, ver, name,
+                        (unsigned long long)d_open);
+
+            if (name[0]=='m' && name[1]=='p' && name[2]=='4') {
+                klog_printf("[CDVS] *** mp4-TARGET! cdevsw=0x%llx d_open=0x%llx ***\n",
+                            (unsigned long long)cdevsw_addr,
+                            (unsigned long long)d_open);
+            }
+            if (name[0]=='a' && name[1]=='5' && name[2]=='3') {
+                klog_printf("[CDVS] *** a53-RELATED! cdevsw=0x%llx d_open=0x%llx ***\n",
+                            (unsigned long long)cdevsw_addr,
+                            (unsigned long long)d_open);
+            }
+            found++;
+            if (found > 500) break;
+        }
+        if (found > 500) break;
+    }
+
+    klog_printf("[CDVS] done, found %d cdevsw\n", found);
+    return 0;
+}
+
+int
 probe_mp4_device(uint64_t curproc_hint)
 {
+    (void)curproc_hint;
     test_mp4_open_with_root();
-    walk_find_mp4_cdevsw(curproc_hint);
+    scan_cdevsw();
     return 0;
 }
 
