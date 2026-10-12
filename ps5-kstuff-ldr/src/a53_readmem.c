@@ -687,48 +687,18 @@ find_and_patch_mp4_cdevsw(void)
         klog_printf("[WALK] Confirmed mp4 node '%s' under parent csw 0x%llx\n",
                     mp4_node_name, (unsigned long long)mp4_parent_csw);
 
-        /* Проверяем открытие реального узла /dev/mp4/dump_for_decid! */
-        klog_printf("[TEST_OPEN] 1. raw open(\"/dev/mp4/dump_for_decid\", O_RDWR)...\n");
-        int rfd1 = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
-        int rerr1 = errno;
-        klog_printf("[TEST_OPEN] raw open result: fd=%d errno=%d\n", rfd1, rerr1);
-        if (rfd1 >= 0) {
-            klog_printf("[TEST_OPEN] *** SUCCESS! RAW OPEN SUCCEEDED! fd=%d ***\n", rfd1);
-            close(rfd1);
-        }
-
-        /* 3. Дамп 192 байт mp4 cdevsw для извлечения d_open */
+        /* Дамп 192 байт mp4 cdevsw для извлечения d_open и d_close */
         uint8_t mp4_csw_buf[192] = {0};
         kekcall(KEKCALL_DUMP_MEM, mp4_parent_csw, (uintptr_t)mp4_csw_buf, 192);
         uint64_t mp4_d_open_func = 0;
-        __builtin_memcpy(&mp4_d_open_func, mp4_csw_buf + 0x10, 8);
-        klog_printf("[MP4_CSW] mp4 cdevsw @ 0x%llx d_open func pointer = 0x%llx\n",
-                    (unsigned long long)mp4_parent_csw, (unsigned long long)mp4_d_open_func);
-
-        for (int off = 0; off < 64; off += 8) {
-            uint64_t val = 0;
-            __builtin_memcpy(&val, mp4_csw_buf + off, 8);
-            klog_printf("[MP4_CSW] +0x%02x = 0x%016llx\n", off, (unsigned long long)val);
-        }
-
-        /* 2. Тест открытия с KEKCALL_MAX_CAPS (sce_caps = all 1s) */
-        klog_printf("[TEST_OPEN] 2. attempting with KEKCALL_MAX_CAPS (all caps = 0xFF)...\n");
-        uint64_t caps_backup[10] = {0};
-        long cr = kekcall(KEKCALL_MAX_CAPS, 0, (uintptr_t)caps_backup, 0);
-        int cfd = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
-        int cerr = errno;
-        klog_printf("[TEST_OPEN] max_caps open result: fd=%d errno=%d (ret=%ld)\n", cfd, cerr, cr);
-        if (cr == 0) {
-            kekcall(KEKCALL_RESTORE_CAPS, 0, (uintptr_t)caps_backup, 0);
-        }
-        if (cfd >= 0) {
-            klog_printf("[TEST_OPEN] *** SUCCESS! /dev/mp4/dump_for_decid OPENED WITH MAX_CAPS! fd=%d ***\n", cfd);
-            close(cfd);
-        }
-
-        /* 3. Запись d_open через KEKCALL_WRITE64 (kekcall 27) на адрес d_close (+0x20) */
         uint64_t mp4_d_close_func = 0;
+        __builtin_memcpy(&mp4_d_open_func, mp4_csw_buf + 0x10, 8);
         __builtin_memcpy(&mp4_d_close_func, mp4_csw_buf + 0x20, 8);
+        klog_printf("[MP4_CSW] mp4 cdevsw @ 0x%llx d_open=0x%llx d_close=0x%llx\n",
+                    (unsigned long long)mp4_parent_csw, (unsigned long long)mp4_d_open_func,
+                    (unsigned long long)mp4_d_close_func);
+
+        /* Прямой патч d_open через KEKCALL_WRITE64 (kekcall 27) на адрес d_close (+0x20) */
         klog_printf("[PATCH] writing d_open via KEKCALL_WRITE64(27) to csw+0x10 (0x%llx) val=d_close (0x%llx)...\n",
                     (unsigned long long)(mp4_parent_csw + 0x10ULL), (unsigned long long)mp4_d_close_func);
 
@@ -763,7 +733,7 @@ int
 probe_mp4_device(uint64_t curproc_hint)
 {
     (void)curproc_hint;
-    test_mp4_open_with_root();
+    /* test_mp4_open_with_root(); */
     scan_cdevsw();
     find_and_patch_mp4_cdevsw();
     return 0;
