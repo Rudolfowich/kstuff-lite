@@ -65,12 +65,24 @@ static uint64_t g_xref[32];
 int
 probe_mp4_device(void)
 {
-    uint64_t str_addrs[2] = { 0xffffffffd99f4f61ULL, 0xffffffffd9a138aaULL };
+    uint64_t str_addrs[32] = {0};
+    klog_puts("[a53] dynamic scan for \"mp4/dump\" with current KASLR ...\n");
+    long nfound = kekcall(KEKCALL_SCAN_DMEM, 32, (uintptr_t)str_addrs, 0);
+    klog_printf("[a53] dynamic scan: total=%ld\n", nfound);
+    for (int i = 0; i < 32 && i < nfound; i++) {
+        klog_printf("[a53]   found[%d] = 0x%016llx\n", i, (unsigned long long)str_addrs[i]);
+    }
 
-    /* Dump окружения вокруг обоих */
-    for (int a = 0; a < 2; a++) {
+    if (nfound <= 0 || !str_addrs[0]) {
+        klog_puts("[a53] no occurrences found\n");
+        return -1;
+    }
+
+    int count = (nfound > 2) ? 2 : (int)nfound;
+    /* Dump окружения вокруг актуальных найденных адресов */
+    for (int a = 0; a < count; a++) {
         for (int i = 0; i < 64; i++) g_dump[i] = 0;
-        klog_printf("[a53] === dump around 0x%llx ===\n", (unsigned long long)str_addrs[a]);
+        klog_printf("[a53] === dump around actual addr 0x%llx ===\n", (unsigned long long)str_addrs[a]);
         kekcall(KEKCALL_DUMP_MEM, str_addrs[a], (uintptr_t)g_dump, 0);
         for (int i = 0; i < 64; i++) {
             char asc[9] = {0};
@@ -85,7 +97,7 @@ probe_mp4_device(void)
     }
 
     /* Scan xref: кто ссылается на эти адреса */
-    for (int a = 0; a < 2; a++) {
+    for (int a = 0; a < count; a++) {
         for (int i = 0; i < 32; i++) g_xref[i] = 0;
         klog_printf("[a53] === xref to 0x%llx ===\n", (unsigned long long)str_addrs[a]);
         long nref = kekcall(KEKCALL_SCAN_XREF, str_addrs[a], (uintptr_t)g_xref, 16);
