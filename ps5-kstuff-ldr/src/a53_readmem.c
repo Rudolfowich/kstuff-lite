@@ -577,41 +577,68 @@ probe_opened_mp4_fd(int fd, const char *name)
 {
     klog_printf("[PROBE] === Starting deep probe on %s (fd=%d) ===\n", name, fd);
 
-    /* Чистый изолированный тест: первый же write на абсолютно свежем fd */
-    if (strstr(name, "deci_mp4_ioc")) {
-        /* cmd = 22 на свежем fd */
-        uint8_t req22[8] = {0};
-        *(uint32_t*)req22 = 0x44454349; /* 'DECI' */
-        *(uint32_t*)(req22 + 4) = 22;
-        ssize_t nw22 = write(fd, req22, 8);
-        uint8_t resp22[512] = {0};
-        ssize_t nr22 = read(fd, resp22, sizeof(resp22));
-        uint32_t st22 = *(uint32_t*)resp22;
-        uint32_t len22 = *(uint32_t*)(resp22 + 4);
-        klog_printf("[FIRST_CMD22] nw=%zd nr=%zd status=0x%08x len=0x%08x\n",
-                    nw22, nr22, st22, len22);
+    /* Специфический глубокий probe для /dev/mp4/dump_for_decid */
+    if (strstr(name, "dump_for_decid")) {
+        klog_printf("[INIT_PROBE] === Starting comprehensive session init on %s (fd=%d) ===\n", name, fd);
 
-        /* Свежий fd для cmd = 23 */
-        int fd23 = open(name, 0x0002 /* O_RDWR */);
-        if (fd23 >= 0) {
-            uint8_t req23[8] = {0};
-            *(uint32_t*)req23 = 0x44454349; /* 'DECI' */
-            *(uint32_t*)(req23 + 4) = 23;
-            ssize_t nw23 = write(fd23, req23, 8);
-            uint8_t resp23[512] = {0};
-            ssize_t nr23 = read(fd23, resp23, sizeof(resp23));
-            uint32_t st23 = *(uint32_t*)resp23;
-            uint32_t len23 = *(uint32_t*)(resp23 + 4);
-            klog_printf("[FIRST_CMD23] nw=%zd nr=%zd status=0x%08x len=0x%08x\n",
-                        nw23, nr23, st23, len23);
-            close(fd23);
+        /* Шаг 1: Сканирование ioctl диапазонов */
+        uint8_t ioctl_buf[256] = {0};
+        const uint32_t ioctl_bases[] = {0x40044400, 0x80044400, 0xC0184400, 0xC0084400, 0x20004400, 0x40044D00, 0x80044D00, 0xC0184D00};
+        for (int b = 0; b < 8; b++) {
+            uint32_t base = ioctl_bases[b];
+            for (uint32_t cmd = base; cmd <= base + 0x10; cmd++) {
+                errno = 0;
+                int r = ioctl(fd, cmd, ioctl_buf);
+                int err = errno;
+                if (r != -1 || err != 25 /* ENOTTY */) {
+                    klog_printf("[IOCTL_HIT] cmd=0x%08x ret=%d errno=%d *** RECOGNIZED! ***\n", cmd, r, err);
+                }
+            }
         }
-    } else {
-        /* Для остальных нод — обычный короткий read check */
-        uint8_t dummy[64] = {0};
-        ssize_t nr = read(fd, dummy, sizeof(dummy));
-        klog_printf("[NODE_CHECK] %s: read nr=%zd status=0x%08x\n", name, nr, *(uint32_t*)dummy);
+
+        /* Шаг 2: Handshake-записи с магическими заголовками */
+        const uint8_t magics[][8] = {
+            {0x44,0x45,0x43,0x49, 0x01,0x00,0x00,0x00},  /* "DECI" + ver 1 */
+            {0x4D,0x50,0x34,0x44, 0x01,0x00,0x00,0x00},  /* "MP4D" + ver 1 */
+            {0x01,0x00,0x00,0x00, 0x00,0x00,0x00,0x00},  /* init cmd 1 */
+            {0x10,0x00,0x00,0x00, 0x00,0x00,0x00,0x00},  /* init cmd 0x10 */
+            {0xDE,0xC1,0x4D,0x50, 0x00,0x00,0x00,0x00},  /* 0xDEC14D50 */
+            {0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00},  /* 8 zeros */
+        };
+
+        for (int i = 0; i < 6; i++) {
+            errno = 0;
+            ssize_t nw = write(fd, magics[i], 8);
+            int werr = errno;
+            uint8_t resp[256] = {0};
+            errno = 0;
+            ssize_t nr = read(fd, resp, sizeof(resp));
+            int rerr = errno;
+
+            klog_printf("[INIT_%d] nw=%zd (errno=%d) nr=%zd (errno=%d) first_u32=0x%08x\n",
+                        i, nw, werr, nr, rerr, *(uint32_t*)resp);
+
+            if (nr > 0) {
+                klog_printf("[INIT_HIT] *** BINGO! %s session produced %zd bytes! ***\n", name, nr);
+                for (int off = 0; off < nr && off < 64; off += 16) {
+                    klog_printf("[INIT_DATA] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                off, resp[off], resp[off+1], resp[off+2], resp[off+3],
+                                resp[off+4], resp[off+5], resp[off+6], resp[off+7]);
+                }
+            }
+        }
+
+        /* Шаг 3: Повторный read после всех попыток инициализации */
+        uint8_t final_buf[256] = {0};
+        errno = 0;
+        ssize_t nr_final = read(fd, final_buf, sizeof(final_buf));
+        klog_printf("[INIT_FINAL] post-handshake read nr=%zd errno=%d\n", nr_final, errno);
+        return;
     }
+
+    uint8_t dummy[64] = {0};
+    ssize_t nr = read(fd, dummy, sizeof(dummy));
+    klog_printf("[NODE_CHECK] %s: read nr=%zd status=0x%08x\n", name, nr, *(uint32_t*)dummy);
 }
 
 /* Полноценный полный обход d_devs для каждого найденного cdevsw БЕЗ прерываний */
