@@ -878,42 +878,40 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
 
     /* ТЕСТ ПЕРВЫЙ: Сканирование offset'ов td_ucred / p_ucred (KEKCALL 31) */
     klog_printf("[TEST0] === SCAN_TD_UCRED: scanning struct thread/proc for ucred offsets ===\n");
-    uint64_t scan_result[2] = {0};
+    uint64_t scan_result[8] = {0};
     long scan_ret = kekcall(KEKCALL_SCAN_TD_UCRED, (uintptr_t)scan_result, 0, 0);
     uint32_t empirical_td_off = (uint32_t)(scan_result[0] & 0xFFFFFFFF);
     uint32_t empirical_p_off  = (uint32_t)(scan_result[1] & 0xFFFFFFFF);
-    klog_printf("[TEST0] SCAN ret=%ld td_ucred_off=0x%x p_ucred_off=0x%x\n",
-                scan_ret, empirical_td_off, empirical_p_off);
+    uint64_t scanned_td       = scan_result[2];
+    uint64_t scanned_proc     = scan_result[3];
+    uint64_t scanned_td_ucred = scan_result[4];
+    uint64_t scanned_p_ucred  = scan_result[5];
+    uint64_t scanned_td_auth  = scan_result[6];
+    uint64_t scanned_p_auth   = scan_result[7];
+
+    klog_printf("[TEST0] SCAN ret=%ld td_off=0x%x p_off=0x%x td=0x%llx proc=0x%llx\n",
+                scan_ret, empirical_td_off, empirical_p_off,
+                (unsigned long long)scanned_td, (unsigned long long)scanned_proc);
+    klog_printf("[TEST0] SCAN vals: td_ucred=0x%llx (auth=0x%llx) p_ucred=0x%llx (auth=0x%llx)\n",
+                (unsigned long long)scanned_td_ucred, (unsigned long long)scanned_td_auth,
+                (unsigned long long)scanned_p_ucred, (unsigned long long)scanned_p_auth);
 
     /* ТЕСТ ВТОРОЙ: Верификация работы SWAP_BY_UCRED (KEKCALL 30) */
     klog_printf("[TEST1] === Verifying KEKCALL_SWAP_BY_UCRED (nr 30) direct pointer swap ===\n");
-    uint64_t my_td = 0;
-    uint64_t ext_check[4] = {0};
-    kekcall(KEKCALL_EXT_DUMP, 0, (uint64_t)ext_check, sizeof(ext_check));
-    my_td = ext_check[1];  /* curthread VA */
-
-    uint64_t ucred_before = 0, ucred_after = 0;
-    /* Читаем текущий ucred через оба кандидатных offset'а для сравнения */
-    kekcall(KEKCALL_DUMP_MEM, my_td + 0x140ULL, (uintptr_t)&ucred_before, 8);
-    uint64_t ucred_before_emp = 0;
-    if (empirical_td_off)
-        kekcall(KEKCALL_DUMP_MEM, my_td + (uint64_t)empirical_td_off, (uintptr_t)&ucred_before_emp, 8);
-    klog_printf("[TEST1] my_td=0x%llx ucred@0x140=0x%llx ucred@0x%x=0x%llx\n",
-                (unsigned long long)my_td,
-                (unsigned long long)ucred_before,
-                empirical_td_off, (unsigned long long)ucred_before_emp);
-
     uint64_t init_target_ucred = g_cand_ucreds[0]; /* pid=1 ucred */
-    
     uint64_t swap_bkp[4] = {0};
     long swap_ret = kekcall(KEKCALL_SWAP_BY_UCRED, init_target_ucred, (uintptr_t)swap_bkp, 0);
-    kekcall(KEKCALL_DUMP_MEM, my_td + 0x140ULL, (uintptr_t)&ucred_after, 8);
-    kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)swap_bkp, 0);
+    klog_printf("[SWAP_VERIFY] swap_ret=%ld old_td=0x%llx old_p=0x%llx new_td=0x%llx new_p=0x%llx target=0x%llx\n",
+                swap_ret,
+                (unsigned long long)swap_bkp[0], (unsigned long long)swap_bkp[1],
+                (unsigned long long)swap_bkp[2], (unsigned long long)swap_bkp[3],
+                (unsigned long long)init_target_ucred);
 
-    klog_printf("[SWAP_VERIFY] ret=%ld before=0x%llx after=0x%llx target=0x%llx %s\n",
-                swap_ret, (unsigned long long)ucred_before, (unsigned long long)ucred_after,
-                (unsigned long long)init_target_ucred,
-                (ucred_after == init_target_ucred && init_target_ucred != 0) ? "CONFIRMED_WORKING" : "SWAP_FAILED");
+    if (swap_ret == 0) {
+        kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)swap_bkp, 0);
+        klog_printf("[SWAP_VERIFY] restore done, %s\n",
+                    (swap_bkp[2] == init_target_ucred && init_target_ucred != 0) ? "CONFIRMED_WORKING" : "SWAP_FAILED");
+    }
 
 
     /* ТЕСТ ВТОРОЙ: Dump cdevsw mp4/dump_for_decid */

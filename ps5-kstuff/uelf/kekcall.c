@@ -892,7 +892,7 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
     {
         /* SWAP_BY_UCRED: подмена td_ucred + p_ucred напрямую по указателю target_ucred.
          * args[RDI] = target_ucred (uint64_t)
-         * args[RSI] = user_buf (32 байта backup: old_td_ucred, old_p_ucred)
+         * args[RSI] = user_buf (32 байта backup: old_td_ucred, old_p_ucred, new_td, new_p)
          * regs[RDI] = curthread */
         uint64_t target_ucred = args[RDI];
         uint64_t user_buf     = args[RSI];
@@ -902,7 +902,6 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
 
         if (!target_ucred) return EINVAL;
 
-        /* Диагностика: сканируем td в диапазоне 0x120..0x180 чтобы найти реальный offset td_ucred */
         uint32_t td_ucred_off = 0x140;  /* default */
         uint32_t p_ucred_off  = 0x40;   /* default */
 
@@ -912,7 +911,6 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
             uint64_t v = 0;
             if (kpeek64_checked(td + toff, &v)) continue;
             if ((v >> 48) != 0xffff) continue;
-            /* Проверяем: по v+0x58 должен быть ненулевой authid */
             uint64_t authid_check = 0;
             if (kpeek64_checked(v + 0x58, &authid_check)) continue;
             if (authid_check != 0) {
@@ -942,29 +940,20 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
             kpeek64_checked(proc + p_ucred_off, &backup[1]);   /* old p_ucred */
         }
 
-        klog_printf("[SWAP30] td=0x%llx proc=0x%llx td_off=0x%x p_off=0x%x target=0x%llx before_td=0x%llx before_p=0x%llx\n",
-                    (unsigned long long)td, (unsigned long long)proc,
-                    td_ucred_off, p_ucred_off,
-                    (unsigned long long)target_ucred,
-                    (unsigned long long)backup[0], (unsigned long long)backup[1]);
-
-        if (user_buf) {
-            if (copy_to_kernel(user_buf, backup, sizeof(backup)))
-                return EFAULT;
-        }
-
         kpoke64(td + td_ucred_off, target_ucred);
         if (proc) {
             kpoke64(proc + p_ucred_off, target_ucred);
         }
 
-        /* Верификация записи */
-        uint64_t verify_td = 0, verify_p = 0;
-        kpeek64_checked(td + td_ucred_off, &verify_td);
-        if (proc) kpeek64_checked(proc + p_ucred_off, &verify_p);
-        klog_printf("[SWAP30] after: td_ucred=0x%llx p_ucred=0x%llx %s\n",
-                    (unsigned long long)verify_td, (unsigned long long)verify_p,
-                    (verify_td == target_ucred) ? "TD_OK" : "TD_FAIL");
+        kpeek64_checked(td + td_ucred_off, &backup[2]);   /* new td_ucred */
+        if (proc) {
+            kpeek64_checked(proc + p_ucred_off, &backup[3]);   /* new p_ucred */
+        }
+
+        if (user_buf) {
+            if (copy_to_kernel(user_buf, backup, sizeof(backup)))
+                return EFAULT;
+        }
 
         args[RAX] = 0;
         return 0;
@@ -973,7 +962,16 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
     {
         /* SCAN_TD_UCRED_OFFSET: эмпирически находит offset td_ucred в struct thread
          * и p_ucred в struct proc для текущей сессии.
-         * args[RDI] = user_buf (8 байт: [0]=td_ucred_off, [1]=p_ucred_off)
+         * args[RDI] = user_buf (размер 128 байт:
+         *   [0] = td_ucred_off
+         *   [1] = p_ucred_off
+         *   [2] = td (curthread ptr)
+         *   [3] = proc (curproc ptr)
+         *   [4] = td_ucred_val
+         *   [5] = p_ucred_val
+         *   [6] = td_authid
+         *   [7] = p_authid
+         * )
          * regs[RDI] = curthread */
         uint64_t user_buf = args[RDI];
         uint64_t td       = regs[RDI];
@@ -982,30 +980,23 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
 
         uint32_t td_ucred_off = 0;
         uint32_t p_ucred_off  = 0;
+        uint64_t td_ucred_val = 0;
+        uint64_t p_ucred_val  = 0;
+        uint64_t td_authid    = 0;
+        uint64_t p_authid     = 0;
 
-        klog_printf("[SCAN31] td=0x%llx proc=0x%llx\n",
-                    (unsigned long long)td, (unsigned long long)proc);
-
-        /* Сканируем td 0x110..0x190 (захватываем 0x120..0x180 с запасом) */
+        /* Сканируем td 0x110..0x190 */
         for (uint32_t toff = 0x110; toff <= 0x190; toff += 8) {
             uint64_t v = 0;
-            if (kpeek64_checked(td + toff, &v)) {
-                klog_printf("[SCAN31] td+0x%x: FAULT\n", toff);
-                continue;
-            }
-            if ((v >> 48) != 0xffff) {
-                klog_printf("[SCAN31] td+0x%x: 0x%llx (not kernel ptr)\n", toff, (unsigned long long)v);
-                continue;
-            }
-            /* Проверяем ucred: по +0x58 должен быть ненулевой authid */
+            if (kpeek64_checked(td + toff, &v)) continue;
+            if ((v >> 48) != 0xffff) continue;
             uint64_t authid = 0;
-            int peek_err = kpeek64_checked(v + 0x58, &authid);
-            klog_printf("[SCAN31] td+0x%x: ptr=0x%llx authid@+0x58=0x%llx (peek_err=%d)\n",
-                        toff, (unsigned long long)v, (unsigned long long)authid, peek_err);
-            if (!peek_err && authid != 0 && td_ucred_off == 0) {
+            if (kpeek64_checked(v + 0x58, &authid)) continue;
+            if (authid != 0 && td_ucred_off == 0) {
                 td_ucred_off = toff;
-                klog_printf("[SCAN31] *** FOUND td_ucred_off=0x%x ptr=0x%llx authid=0x%llx ***\n",
-                            toff, (unsigned long long)v, (unsigned long long)authid);
+                td_ucred_val = v;
+                td_authid    = authid;
+                break;
             }
         }
 
@@ -1013,31 +1004,30 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         if (proc) {
             for (uint32_t poff = 0x20; poff <= 0x80; poff += 8) {
                 uint64_t v = 0;
-                if (kpeek64_checked(proc + poff, &v)) {
-                    klog_printf("[SCAN31] proc+0x%x: FAULT\n", poff);
-                    continue;
-                }
-                if ((v >> 48) != 0xffff) {
-                    klog_printf("[SCAN31] proc+0x%x: 0x%llx (not kernel ptr)\n", poff, (unsigned long long)v);
-                    continue;
-                }
+                if (kpeek64_checked(proc + poff, &v)) continue;
+                if ((v >> 48) != 0xffff) continue;
                 uint64_t authid = 0;
-                int peek_err = kpeek64_checked(v + 0x58, &authid);
-                klog_printf("[SCAN31] proc+0x%x: ptr=0x%llx authid@+0x58=0x%llx (peek_err=%d)\n",
-                            poff, (unsigned long long)v, (unsigned long long)authid, peek_err);
-                if (!peek_err && authid != 0 && p_ucred_off == 0) {
+                if (kpeek64_checked(v + 0x58, &authid)) continue;
+                if (authid != 0 && p_ucred_off == 0) {
                     p_ucred_off = poff;
-                    klog_printf("[SCAN31] *** FOUND p_ucred_off=0x%x ptr=0x%llx authid=0x%llx ***\n",
-                                poff, (unsigned long long)v, (unsigned long long)authid);
+                    p_ucred_val = v;
+                    p_authid    = authid;
+                    break;
                 }
             }
         }
 
-        klog_printf("[SCAN31] RESULT: td_ucred_off=0x%x p_ucred_off=0x%x\n",
-                    td_ucred_off, p_ucred_off);
-
         if (user_buf) {
-            uint64_t result[2] = { td_ucred_off, p_ucred_off };
+            uint64_t result[8] = {
+                (uint64_t)td_ucred_off,
+                (uint64_t)p_ucred_off,
+                td,
+                proc,
+                td_ucred_val,
+                p_ucred_val,
+                td_authid,
+                p_authid
+            };
             if (copy_to_kernel(user_buf, result, sizeof(result)))
                 return EFAULT;
         }
