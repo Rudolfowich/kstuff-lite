@@ -14,6 +14,8 @@
 #define KEKCALL_SCAN_DMEM         18
 #define KEKCALL_DUMP_MEM          19
 #define KEKCALL_SCAN_XREF         20
+#define KEKCALL_SCAN_PTR          21
+#define KEKCALL_SCAN_XREF_V2      22
 
 static inline long
 kekcall(uint32_t nr, uint64_t a1, uint64_t a2, uint64_t a3)

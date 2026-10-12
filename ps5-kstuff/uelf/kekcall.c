@@ -542,6 +542,78 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = total;
         return 0;
     }
+    else if(nr == 21)
+    {
+        /* SCAN_PTR_IN_DATA: scan .data from kdata_base forward for 8-byte pointer value.
+         * args[RDI] = user_buf (uint64_t[32])
+         * args[RSI] = needle (8-byte pointer value)
+         * args[RDX] = scan_mb (default 8) */
+        uint64_t user_buf = args[RDI];
+        uint64_t needle = args[RSI];
+        uint64_t scan_mb = args[RDX];
+        if (!user_buf || !needle) return 1;
+        if (scan_mb == 0 || scan_mb > 32) scan_mb = 8;
+
+        extern char kdata_base[];
+        uint64_t kbase = (uint64_t)kdata_base;
+        uint64_t scan_bytes = scan_mb * 1024ULL * 1024ULL;
+
+        uint64_t finds[32] = {0};
+        unsigned nfound = 0, total = 0;
+        uint8_t buf[128];
+
+        for (uint64_t off = 0; off + 8 < scan_bytes; off += 120) {
+            if (copy_from_kernel(buf, kbase + off, 128) != 0) continue;
+            for (unsigned i = 0; i + 8 <= 128; i++) {
+                uint64_t v;
+                __builtin_memcpy(&v, buf + i, 8);
+                if (v == needle) {
+                    total++;
+                    if (nfound < 32) finds[nfound++] = kbase + off + i;
+                }
+            }
+        }
+
+        if (copy_to_kernel(user_buf, finds, sizeof(finds)) != 0)
+            return EFAULT;
+        args[RAX] = total;
+        return 0;
+    }
+    else if(nr == 22)
+    {
+        /* SCAN_XREF_V2: xref scan with explicit start_abs (always 1MB to avoid watchdog)
+         * args[RDI] = target
+         * args[RSI] = user_buf
+         * args[RDX] = start_abs */
+        uint64_t target = args[RDI];
+        uint64_t user_buf = args[RSI];
+        uint64_t start_abs = args[RDX];
+        if (!target || !user_buf || !start_abs) return 1;
+
+        uint64_t scan_bytes = 1024ULL * 1024ULL;
+
+        uint64_t finds[32] = {0};
+        unsigned nfound = 0, total = 0;
+        uint8_t buf[128];
+
+        for (uint64_t off = 0; off + 4 < scan_bytes; off += 120) {
+            if (copy_from_kernel(buf, start_abs + off, 128) != 0) continue;
+            for (unsigned i = 0; i + 4 <= 128; i++) {
+                int32_t disp;
+                __builtin_memcpy(&disp, buf + i, 4);
+                uint64_t rip_after = start_abs + off + i + 4;
+                if ((rip_after + (int64_t)disp) == target) {
+                    total++;
+                    if (nfound < 32) finds[nfound++] = start_abs + off + i;
+                }
+            }
+        }
+
+        if (copy_to_kernel(user_buf, finds, sizeof(finds)) != 0)
+            return EFAULT;
+        args[RAX] = total;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;

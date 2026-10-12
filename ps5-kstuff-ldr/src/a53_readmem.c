@@ -118,46 +118,58 @@ probe_mp4_device(void)
                     (unsigned long long)(base + i*8));
     }
 
-    /* 3. Scan .text for XREF to str_addr */
+    /* ===== APPROACH 1: Scan .data для указателя на str_addr =====
+     * cdevsw у offset 8 имеет d_name = pointer на имя драйвера.
+     * Если d_name указывает на "mp4/dump" — найдём cdevsw в .data */
+    klog_puts("[a53] approach 1: scan kdata_base .data for pointer to str_addr\n");
+    static uint64_t g_ptr_finds[32];
+    for (int i = 0; i < 32; i++) g_ptr_finds[i] = 0;
+
+    long n_ptr = kekcall(KEKCALL_SCAN_PTR, (uintptr_t)g_ptr_finds, str_addr, 8 /* MB */);
+    klog_printf("[a53] .data ptr scan: total=%ld\n", n_ptr);
+    for (int i = 0; i < 32; i++) {
+        if (g_ptr_finds[i]) {
+            klog_printf("[a53]   ptr_find[%d] = 0x%016llx\n", i, (unsigned long long)g_ptr_finds[i]);
+            /* Дампим окружение вокруг найденного указателя (cdevsw) */
+            kekcall(KEKCALL_DUMP_MEM, g_ptr_finds[i], (uintptr_t)g_dump, 0);
+            for (int d = 0; d < 16; d++) {
+                klog_printf("[a53]     cdevsw[%+3d] = 0x%016llx @ 0x%llx\n",
+                            (d - 8)*8, (unsigned long long)g_dump[d + 24],
+                            (unsigned long long)(((g_ptr_finds[i] - 256) & ~7ULL) + (d + 24)*8));
+            }
+        }
+    }
+    if (n_ptr > 0) return 0;
+
+    /* ===== APPROACH 2: xref scan маленькими chunks по 1 MB =====
+     * Разбиваем 10 MB на 10 кусков по 1 MB каждый.
+     * Между вызовами kekcall ядро возвращается в юзерленд и получает heartbeat. */
+    klog_puts("[a53] approach 2: xref scan backward, 1MB chunks\n");
     static uint64_t g_xref[32];
+    for (int chunk = 1; chunk <= 10; chunk++) {
+        for (int i = 0; i < 32; i++) g_xref[i] = 0;
 
-    /* 3.1 XREF НАЗАД (отрицательный offset: -10 МБ от str_addr) */
-    for (int i = 0; i < 32; i++) g_xref[i] = 0;
-    klog_printf("[a53] xref scan: 10MB backward from 0x%llx ...\n", (unsigned long long)str_addr);
-    long n_back = kekcall(KEKCALL_SCAN_XREF, str_addr, (uintptr_t)g_xref, (uint64_t)-10LL);
-    klog_printf("[a53] xref backward total=%ld\n", n_back);
-    for (int i = 0; i < 32; i++) {
-        if (g_xref[i]) {
-            klog_printf("[a53]   xref_back[%d] = 0x%016llx\n", i, (unsigned long long)g_xref[i]);
-            /* Дампим инструкции вокруг XREF */
-            kekcall(KEKCALL_DUMP_MEM, g_xref[i], (uintptr_t)g_dump, 0);
-            for (int d = 0; d < 16; d++) {
-                klog_printf("[a53]     xref_code[%+3d] = 0x%016llx @ 0x%llx\n",
-                            (d - 8)*8, (unsigned long long)g_dump[d + 24],
-                            (unsigned long long)(((g_xref[i] - 256) & ~7ULL) + (d + 24)*8));
+        uint64_t chunk_start = str_addr - (uint64_t)(chunk) * 1024ULL * 1024ULL;
+        long n_c = kekcall(KEKCALL_SCAN_XREF_V2,
+                           str_addr,                   /* target */
+                           (uintptr_t)g_xref,         /* buf */
+                           chunk_start);              /* start_abs */
+        klog_printf("[a53] xref chunk %d (start 0x%llx, 1MB): total=%ld\n",
+                    chunk, (unsigned long long)chunk_start, n_c);
+        for (int i = 0; i < 32; i++) {
+            if (g_xref[i]) {
+                klog_printf("[a53]   chunk%d[%d] = 0x%016llx\n", chunk, i, (unsigned long long)g_xref[i]);
+                kekcall(KEKCALL_DUMP_MEM, g_xref[i], (uintptr_t)g_dump, 0);
+                for (int d = 0; d < 16; d++) {
+                    klog_printf("[a53]     xref_code[%+3d] = 0x%016llx @ 0x%llx\n",
+                                (d - 8)*8, (unsigned long long)g_dump[d + 24],
+                                (unsigned long long)(((g_xref[i] - 256) & ~7ULL) + (d + 24)*8));
+                }
             }
         }
     }
 
-    /* 3.2 XREF ВПЕРЁД (+10 МБ от str_addr) */
-    for (int i = 0; i < 32; i++) g_xref[i] = 0;
-    klog_printf("[a53] xref scan: 10MB forward from 0x%llx ...\n", (unsigned long long)str_addr);
-    long n_fwd = kekcall(KEKCALL_SCAN_XREF, str_addr, (uintptr_t)g_xref, 10);
-    klog_printf("[a53] xref forward total=%ld\n", n_fwd);
-    for (int i = 0; i < 32; i++) {
-        if (g_xref[i]) {
-            klog_printf("[a53]   xref_fwd[%d] = 0x%016llx\n", i, (unsigned long long)g_xref[i]);
-            /* Дампим инструкции вокруг XREF */
-            kekcall(KEKCALL_DUMP_MEM, g_xref[i], (uintptr_t)g_dump, 0);
-            for (int d = 0; d < 16; d++) {
-                klog_printf("[a53]     xref_code[%+3d] = 0x%016llx @ 0x%llx\n",
-                            (d - 8)*8, (unsigned long long)g_dump[d + 24],
-                            (unsigned long long)(((g_xref[i] - 256) & ~7ULL) + (d + 24)*8));
-            }
-        }
-    }
-
-    return (n_back + n_fwd > 0) ? 0 : -1;
+    return 0;
 }
 
 /* ---- Main install entry --------------------------------------------- */
