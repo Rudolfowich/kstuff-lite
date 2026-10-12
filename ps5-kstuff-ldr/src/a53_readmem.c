@@ -121,58 +121,94 @@ step_rodata_hunt(void)
 }
 
 int
-find_mp4_cdev_in_data(void)
+find_mp4_cdevsw_v2(void)
 {
-    /* 1. Находим точный адрес строки "mp4/dump" для текущей сессии KASLR */
-    uint64_t target = 0;
+    /* [0] Динамический адрес str_mp4_dump для текущей сессии KASLR */
+    uint64_t str_mp4_dump = 0;
     static uint64_t g_str[32];
     for (int i = 0; i < 32; i++) g_str[i] = 0;
     kekcall(KEKCALL_SCAN_DMEM, 32, (uintptr_t)g_str, 0);
     for (int i = 0; i < 32; i++) {
         if (g_str[i] && (g_str[i] & 0xff) == 0xaa) {
-            target = g_str[i];
+            str_mp4_dump = g_str[i];
             break;
         }
     }
-    if (!target) {
-        /* fallback на ранее найденный offset если scan не сработал */
-        target = 0xffffffff903138aaULL;
+    if (!str_mp4_dump) {
+        str_mp4_dump = 0xffffffff90fe38aaULL;
     }
+    klog_printf("[MP4] str_mp4_dump anchor @ 0x%llx\n", (unsigned long long)str_mp4_dump);
 
     uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
-    uint64_t data_start = kbase;
 
-    klog_printf("[FIND] kdata_base = 0x%llx, searching .data for ptr to 0x%llx\n",
-                (unsigned long long)data_start, (unsigned long long)target);
+    /* [1] Scan ±4 KB от "mp4/dump" для короткой "mp4\0" */
+    uint64_t found_short[16] = {0};
+    unsigned nfound = 0;
+    uint64_t base = (str_mp4_dump - 4096) & ~7ULL;
 
-    /* 16 MB от kdata_base по 1 MB за чанк */
-    for (int chunk = 0; chunk < 16; chunk++) {
-        uint64_t cs = data_start + chunk * 1024ULL * 1024ULL;
-        uint64_t finds[32] = {0};
+    for (int chunk = 0; chunk < 8; chunk++) {
+        uint64_t cs = base + chunk * 1024;
+        uint8_t cbuf[1024];
+        for (int i = 0; i < 1024; i++) cbuf[i] = 0;
 
-        /* KEKCALL_SCAN_PTR_CUSTOM: user_buf, needle, scan_mb (1), start_param (cs) */
-        long n = kekcall5(KEKCALL_SCAN_PTR_CUSTOM, (uintptr_t)finds, target, 1, cs);
+        if (kekcall(KEKCALL_DUMP_MEM, cs, (uintptr_t)cbuf, 1024) != 0) continue;
 
-        klog_printf("[FIND] chunk %d @ 0x%llx: %ld ptrs\n",
-                    chunk, (unsigned long long)cs, n);
-
-        if (n > 0) {
-            for (int i = 0; i < 16; i++) {
-                if (finds[i]) {
-                    klog_printf("[FIND]   ptr @ 0x%llx\n", (unsigned long long)finds[i]);
-                }
+        for (int i = 1; i + 4 < 1024; i++) {
+            /* Паттерн "mp4\0" с null-разделителем перед */
+            if (cbuf[i-1] == 0x00 &&
+                cbuf[i]   == 0x6D && cbuf[i+1] == 0x70 &&
+                cbuf[i+2] == 0x34 && cbuf[i+3] == 0x00)
+            {
+                uint64_t addr = cs + i;
+                klog_printf("[MP4] short str @ 0x%llx\n", (unsigned long long)addr);
+                if (nfound < 16) found_short[nfound++] = addr;
             }
         }
-
-        sleep(1);  /* heartbeat */
     }
+
+    klog_printf("[MP4] found %u short mp4 strings\n", nfound);
+
+    /* [2] Для каждой найденной "mp4\0" — scan .data для указателей */
+    for (unsigned k = 0; k < nfound; k++) {
+        uint64_t target = found_short[k];
+        klog_printf("[MP4] scan .data for ptr to 0x%llx\n", (unsigned long long)target);
+
+        for (int chunk = 0; chunk < 16; chunk++) {
+            uint64_t cs = kbase + chunk * 1024ULL * 1024ULL;
+            uint64_t finds[32] = {0};
+            long n = kekcall5(KEKCALL_SCAN_PTR_CUSTOM, (uintptr_t)finds, target, 1, cs);
+            if (n > 0) {
+                klog_printf("[MP4]   chunk %d: %ld ptrs\n", chunk, n);
+                for (int j = 0; j < 16; j++) {
+                    if (finds[j]) {
+                        /* ptr @ X — это поле d_name в struct cdevsw mp4_cdevsw
+                         * В FreeBSD:
+                         * +0x00: d_version (int), d_flags (uint) -> 8 байт
+                         * +0x08: d_name (const char*)
+                         * +0x10: d_open
+                         * cdevsw = finds[j] - 0x08
+                         * d_open = cdevsw + 0x10 = finds[j] + 0x08
+                         */
+                        uint64_t cdevsw_addr = finds[j] - 0x08;
+                        uint64_t d_open_addr = cdevsw_addr + 0x10;
+                        klog_printf("[MP4]     ptr @ 0x%llx (cdevsw ~ 0x%llx, d_open ~ 0x%llx)\n",
+                                    (unsigned long long)finds[j],
+                                    (unsigned long long)cdevsw_addr,
+                                    (unsigned long long)d_open_addr);
+                    }
+                }
+            }
+            sleep(1);
+        }
+    }
+
     return 0;
 }
 
 int
 probe_mp4_device(void)
 {
-    find_mp4_cdev_in_data();
+    find_mp4_cdevsw_v2();
     return 0;
 }
 
