@@ -582,122 +582,105 @@ probe_opened_mp4_fd(int fd, const char *name)
     errno = 0;
     ssize_t nw = write(fd, zero8, 8);
     int werr = errno;
-    klog_printf("[PROBE_INIT] write(%s, 8 zeros): nw=%ld errno=%d\n", name, (long)nw, werr);
+    klog_printf("[DECI_PROBE] write(%s, 8 zeros): nw=%ld errno=%d\n", name, (long)nw, werr);
 
-    uint8_t init_buf[256] = {0};
+    uint8_t init_buf[512] = {0};
     errno = 0;
     ssize_t nr0 = read(fd, init_buf, sizeof(init_buf));
     int rerr0 = errno;
-    klog_printf("[PROBE_INIT] post-write read(%s, 256): nr=%ld errno=%d\n", name, (long)nr0, rerr0);
+    klog_printf("[DECI_PROBE] post-write read(%s): nr=%ld errno=%d\n", name, (long)nr0, rerr0);
     if (nr0 > 0) {
-        klog_printf("[PROBE_INIT] read %ld bytes! First 32 bytes:\n", (long)nr0);
-        for (int r = 0; r < 32 && r < nr0; r += 16) {
-            klog_printf("[PROBE_INIT] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+        klog_printf("[DECI_FULL] === FULL %ld BYTES RESPONSE DUMP FOR %s ===\n", (long)nr0, name);
+        for (int r = 0; r < nr0; r += 16) {
+            klog_printf("[DECI_FULL] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
                         r,
-                        init_buf[r+0], init_buf[r+1], init_buf[r+2], init_buf[r+3], init_buf[r+4], init_buf[r+5], init_buf[r+6], init_buf[r+7],
-                        init_buf[r+8], init_buf[r+9], init_buf[r+10], init_buf[r+11], init_buf[r+12], init_buf[r+13], init_buf[r+14], init_buf[r+15]);
+                        init_buf[r+0], init_buf[r+1], init_buf[r+2], init_buf[r+3],
+                        init_buf[r+4], init_buf[r+5], init_buf[r+6], init_buf[r+7],
+                        init_buf[r+8], init_buf[r+9], init_buf[r+10], init_buf[r+11],
+                        init_buf[r+12], init_buf[r+13], init_buf[r+14], init_buf[r+15]);
         }
     }
 
-    /* 2. Расширенный ioctl sweep */
-    klog_printf("[PROBE_IOCTL] starting deep ioctl sweep on %s...\n", name);
-    int total_hits = 0;
+    /* 1. Тест magic numbers */
+    uint32_t magics[] = {
+        0x44454349,  /* "DECI" */
+        0x49434544,  /* "ICED" */
+        0xDEC1DEC1,
+        0xDECAFBAD,
+        0xCAFEBABE,
+        0x00000001,
+        0x00000100,
+        0x00010000,
+    };
+    int nmagics = sizeof(magics)/sizeof(magics[0]);
 
-    /* Список целевых групп: M, m, d, p, A + Sony-specific 0x80..0x9F */
-    uint8_t target_groups[40];
-    int num_groups = 0;
-    target_groups[num_groups++] = 'M';
-    target_groups[num_groups++] = 'm';
-    target_groups[num_groups++] = 'd';
-    target_groups[num_groups++] = 'p';
-    target_groups[num_groups++] = 'A';
-    for (uint8_t g = 0x80; g <= 0x9F; g++) {
-        target_groups[num_groups++] = g;
-    }
+    for (int i = 0; i < nmagics; i++) {
+        uint8_t req[16] = {0};
+        *(uint32_t*)req = magics[i];
+        *(uint32_t*)(req + 4) = 0;  /* cmd = 0 */
 
-    /* Размеры для форм IOR/IOW/IOWR */
-    const size_t sizes[] = {8, 16, 32, 64, 128, 256};
-    const int num_sizes = sizeof(sizes) / sizeof(sizes[0]);
+        write(fd, req, 16);
+        uint8_t rbuf[256] = {0};
+        ssize_t nr = read(fd, rbuf, 256);
+        uint32_t status = *(uint32_t*)rbuf;
+        uint32_t rlen = *(uint32_t*)(rbuf + 4);
 
-    uint8_t ioctl_buf[256];
+        klog_printf("[DECI_MAGIC] magic=0x%08x -> nr=%ld status=0x%08x len=0x%08x\n",
+                    magics[i], (long)nr, status, rlen);
 
-    for (int gi = 0; gi < num_groups; gi++) {
-        uint8_t grp = target_groups[gi];
-        for (int num = 0; num < 256; num++) {
-            /* Форма 1: _IO(grp, num) */
-            unsigned long cmd_io = _IO(grp, num);
-            errno = 0;
-            int r_io = ioctl(fd, cmd_io, 0);
-            int err_io = errno;
-            if (r_io == 0) {
-                klog_printf("[IOCTL_OK] %s _IO(0x%02x, %d) [0x%08lx]: rc=0\n", name, grp, num, cmd_io);
-                total_hits++;
-            } else if (err_io == 22 /* EINVAL */) {
-                klog_printf("[IOCTL_EINVAL] %s _IO(0x%02x, %d) [0x%08lx]: group recognized! wrong args\n", name, grp, num, cmd_io);
-                total_hits++;
-            } else if (err_io != 25 /* ENOTTY */ && err_io != 0) {
-                klog_printf("[IOCTL_OTHER] %s _IO(0x%02x, %d) [0x%08lx]: errno=%d\n", name, grp, num, cmd_io, err_io);
-                total_hits++;
-            }
-
-            /* Формы с размерами: _IOR, _IOW, _IOWR */
-            for (int si = 0; si < num_sizes; si++) {
-                size_t sz = sizes[si];
-
-                /* _IOR */
-                memset(ioctl_buf, 0, sizeof(ioctl_buf));
-                unsigned long cmd_ior = _IOC(IOC_OUT, grp, num, sz);
-                errno = 0;
-                int r_ior = ioctl(fd, cmd_ior, ioctl_buf);
-                int err_ior = errno;
-                if (r_ior == 0) {
-                    klog_printf("[IOCTL_OK] %s _IOR(0x%02x, %d, sz=%zu) [0x%08lx]: rc=0\n", name, grp, num, sz, cmd_ior);
-                    total_hits++;
-                } else if (err_ior == 22 /* EINVAL */) {
-                    klog_printf("[IOCTL_EINVAL] %s _IOR(0x%02x, %d, sz=%zu) [0x%08lx]: group recognized!\n", name, grp, num, sz, cmd_ior);
-                    total_hits++;
-                } else if (err_ior != 25 /* ENOTTY */ && err_ior != 0) {
-                    klog_printf("[IOCTL_OTHER] %s _IOR(0x%02x, %d, sz=%zu) [0x%08lx]: errno=%d\n", name, grp, num, sz, cmd_ior, err_ior);
-                    total_hits++;
-                }
-
-                /* _IOW */
-                memset(ioctl_buf, 0, sizeof(ioctl_buf));
-                unsigned long cmd_iow = _IOC(IOC_IN, grp, num, sz);
-                errno = 0;
-                int r_iow = ioctl(fd, cmd_iow, ioctl_buf);
-                int err_iow = errno;
-                if (r_iow == 0) {
-                    klog_printf("[IOCTL_OK] %s _IOW(0x%02x, %d, sz=%zu) [0x%08lx]: rc=0\n", name, grp, num, sz, cmd_iow);
-                    total_hits++;
-                } else if (err_iow == 22 /* EINVAL */) {
-                    klog_printf("[IOCTL_EINVAL] %s _IOW(0x%02x, %d, sz=%zu) [0x%08lx]: group recognized!\n", name, grp, num, sz, cmd_iow);
-                    total_hits++;
-                } else if (err_iow != 25 /* ENOTTY */ && err_iow != 0) {
-                    klog_printf("[IOCTL_OTHER] %s _IOW(0x%02x, %d, sz=%zu) [0x%08lx]: errno=%d\n", name, grp, num, sz, cmd_iow, err_iow);
-                    total_hits++;
-                }
-
-                /* _IOWR */
-                memset(ioctl_buf, 0, sizeof(ioctl_buf));
-                unsigned long cmd_iowr = _IOC(IOC_INOUT, grp, num, sz);
-                errno = 0;
-                int r_iowr = ioctl(fd, cmd_iowr, ioctl_buf);
-                int err_iowr = errno;
-                if (r_iowr == 0) {
-                    klog_printf("[IOCTL_OK] %s _IOWR(0x%02x, %d, sz=%zu) [0x%08lx]: rc=0\n", name, grp, num, sz, cmd_iowr);
-                    total_hits++;
-                } else if (err_iowr == 22 /* EINVAL */) {
-                    klog_printf("[IOCTL_EINVAL] %s _IOWR(0x%02x, %d, sz=%zu) [0x%08lx]: group recognized!\n", name, grp, num, sz, cmd_iowr);
-                    total_hits++;
-                } else if (err_iowr != 25 /* ENOTTY */ && err_iowr != 0) {
-                    klog_printf("[IOCTL_OTHER] %s _IOWR(0x%02x, %d, sz=%zu) [0x%08lx]: errno=%d\n", name, grp, num, sz, cmd_iowr, err_iowr);
-                    total_hits++;
-                }
+        if (status != 0xFFFFFFFC && nr > 0) {
+            klog_printf("[DECI_MAGIC] *** BINGO! Status changed! Magic 0x%08x recognized! ***\n", magics[i]);
+            for (int r = 0; r < 32 && r < nr; r += 16) {
+                klog_printf("[DECI_MAGIC_DATA] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                            r, rbuf[r+0], rbuf[r+1], rbuf[r+2], rbuf[r+3],
+                            rbuf[r+4], rbuf[r+5], rbuf[r+6], rbuf[r+7]);
             }
         }
     }
-    klog_printf("[PROBE_IOCTL] sweep on %s complete: %d hits.\n", name, total_hits);
+
+    /* 2. Тест разных размеров заголовка запроса: 4, 8, 12, 16, 24, 32, 64 */
+    size_t header_sizes[] = {4, 8, 12, 16, 24, 32, 64};
+    int nhsizes = sizeof(header_sizes)/sizeof(header_sizes[0]);
+
+    for (int h = 0; h < nhsizes; h++) {
+        uint8_t req_h[64] = {0};
+        /* cmd = 1 */
+        *(uint32_t*)req_h = 1;
+        write(fd, req_h, header_sizes[h]);
+        uint8_t rbuf[256] = {0};
+        ssize_t nr = read(fd, rbuf, 256);
+        uint32_t status = *(uint32_t*)rbuf;
+        uint32_t rlen = *(uint32_t*)(rbuf + 4);
+        klog_printf("[DECI_LEN] write_sz=%zu (cmd=1) -> nr=%ld status=0x%08x len=0x%08x\n",
+                    header_sizes[h], (long)nr, status, rlen);
+    }
+
+    /* 3. Тест команд 0..15 с длиной 8 байт */
+    for (uint32_t c = 0; c < 16; c++) {
+        uint32_t req_c[2] = {c, 0};
+        write(fd, req_c, 8);
+        uint8_t rbuf[256] = {0};
+        ssize_t nr = read(fd, rbuf, 256);
+        uint32_t status = *(uint32_t*)rbuf;
+        if (status != 0xFFFFFFFC) {
+            klog_printf("[DECI_CMD] cmd=%u -> status=0x%08x len=0x%08x nr=%ld\n",
+                        c, status, *(uint32_t*)(rbuf + 4), (long)nr);
+        }
+    }
+
+    /* 4. Тест команд 0..15 с длиной 16 байт */
+    for (uint32_t c = 0; c < 16; c++) {
+        uint32_t req_c[4] = {0x44454349 /* DECI */, c, 0, 0};
+        write(fd, req_c, 16);
+        uint8_t rbuf[256] = {0};
+        ssize_t nr = read(fd, rbuf, 256);
+        uint32_t status = *(uint32_t*)rbuf;
+        if (status != 0xFFFFFFFC) {
+            klog_printf("[DECI_CMD_DECI] cmd=%u -> status=0x%08x len=0x%08x nr=%ld\n",
+                        c, status, *(uint32_t*)(rbuf + 4), (long)nr);
+        }
+    }
+
 }
 
 /* Полноценный полный обход d_devs для каждого найденного cdevsw БЕЗ прерываний */
