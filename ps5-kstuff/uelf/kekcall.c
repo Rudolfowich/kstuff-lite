@@ -157,6 +157,61 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = (uint64_t)idx;
         return 0;
     }
+    else if(nr == 9)
+    {
+        /* ELEVATE_CREDS: подменяем td_ucred/p_ucred на ucred первого
+         * процесса в allproc (обычно root). Backup кладём в user_buf. */
+        uint64_t td = regs[RDI];
+        uint64_t proc = 0;
+        kpeek64_checked(td + 0x08, &proc);
+
+        uint64_t old_td_ucred = 0, old_p_ucred = 0;
+        kpeek64_checked(td + 0x140, &old_td_ucred);
+        kpeek64_checked(proc + 0x40, &old_p_ucred);
+
+        /* Resolve allproc и берём ucred первого процесса в списке */
+        extern char allproc[];        /* extern из offset_list.txt */
+        uint64_t first_proc = 0;
+        kpeek64_checked((uint64_t)allproc, &first_proc);
+        if (!first_proc) return 1;
+
+        uint64_t root_ucred = 0;
+        kpeek64_checked(first_proc + 0x40, &root_ucred);
+        if (!root_ucred) return 2;
+
+        /* copyout backup в user buffer */
+        uint64_t user_buf = args[RSI];
+        if (user_buf) {
+            uint64_t backup[2] = { old_td_ucred, old_p_ucred };
+            if (copy_to_kernel(user_buf, backup, sizeof(backup)))
+                return EFAULT;
+        }
+
+        /* Swap pointers */
+        kpoke64(td + 0x140, root_ucred);
+        kpoke64(proc + 0x40, root_ucred);
+        args[RAX] = 0;
+        return 0;
+    }
+    else if(nr == 10)
+    {
+        /* RESTORE_CREDS: восстанавливаем из user_buf */
+        uint64_t td = regs[RDI];
+        uint64_t proc = 0;
+        kpeek64_checked(td + 0x08, &proc);
+
+        uint64_t user_buf = args[RSI];
+        if (!user_buf) return 1;
+
+        uint64_t backup[2] = {0, 0};
+        if (copy_from_kernel(backup, user_buf, sizeof(backup)))
+            return EFAULT;
+
+        kpoke64(td + 0x140, backup[0]);
+        kpoke64(proc + 0x40, backup[1]);
+        args[RAX] = 0;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;

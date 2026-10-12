@@ -59,22 +59,35 @@ a53_find_profile(uint32_t fw, uint32_t cond)
 int
 probe_mp4_device(void)
 {
-    klog_puts("[a53] probing " MP4_DEV_PATH " ...\n");
+    uint64_t backup[2] = {0, 0};
 
-    int fd = open(MP4_DEV_PATH, O_RDWR);
-    if (fd < 0) {
-        klog_printf("[a53] open(%s) failed: errno=%d (%s)\n",
-                    MP4_DEV_PATH, errno, strerror(errno));
+    klog_puts("[a53] elevating credentials via kekcall(9) ...\n");
+    long elev = kekcall(KEKCALL_ELEVATE_CREDS, 0, (uint64_t)backup, 0);
+    klog_printf("[a53] elevate ret=%ld backup=[0x%llx, 0x%llx]\n",
+                elev, (unsigned long long)backup[0], (unsigned long long)backup[1]);
+
+    if (elev != 0) {
+        klog_puts("[a53] elevation failed — aborting\n");
         return -1;
     }
-    klog_printf("[a53] " MP4_DEV_PATH " opened OK, fd=%d\n", fd);
 
-    /* TODO: once we have ioctl command numbers, probe fw identity here.
-     * For now just confirm the device exists. */
+    klog_puts("[a53] trying open(/dev/mp4/dump) with elevated creds ...\n");
+    int fd = open("/dev/mp4/dump", O_RDWR);
+    int saved_errno = errno;
 
-    close(fd);
-    klog_puts("[a53] probe done, device present\n");
-    return 0;
+    if (fd >= 0) {
+        klog_printf("[a53] ★ /dev/mp4/dump OPENED! fd=%d ★\n", fd);
+        close(fd);
+    } else {
+        klog_printf("[a53] open STILL fails: errno=%d (%s)\n",
+                    saved_errno, strerror(saved_errno));
+    }
+
+    klog_puts("[a53] restoring credentials via kekcall(10) ...\n");
+    long rest = kekcall(KEKCALL_RESTORE_CREDS, 0, (uint64_t)backup, 0);
+    klog_printf("[a53] restore ret=%ld\n", rest);
+
+    return (fd >= 0) ? 0 : -1;
 }
 
 /* ---- Main install entry --------------------------------------------- */

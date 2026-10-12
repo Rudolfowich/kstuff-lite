@@ -2,7 +2,9 @@
 #include <sys/types.h>
 #include <sys/syscall.h>
 
-#define KEKCALL_A53_DUMP   8
+#define KEKCALL_A53_DUMP       8
+#define KEKCALL_ELEVATE_CREDS   9
+#define KEKCALL_RESTORE_CREDS   10
 
 static inline long
 kekcall(uint32_t nr, uint64_t a1, uint64_t a2, uint64_t a3)
