@@ -56,16 +56,32 @@ a53_find_profile(uint32_t fw, uint32_t cond)
 
 /* ---- MP4 device probe ------------------------------------------------ */
 
+static uint64_t g_finds[32];  /* глобальный, не stack */
+
 int
 probe_mp4_device(void)
 {
-    uint64_t finds[32] = {0};
-    klog_puts("[a53] scanning kernel for \"mp4/dump\" string ...\n");
-    long nfound = kekcall(KEKCALL_SCAN_DMEM, (uintptr_t)finds, 32 /* MB */, 0);
-    klog_printf("[a53] scan: total=%ld, printing first 32:\n", nfound);
+    for (int i = 0; i < 32; i++) g_finds[i] = 0;
+
+    /* Сканируем 64MB НАЗАД от kdata_base — там .text + .rodata */
+    klog_puts("[a53] scanning kernel for \"mp4/dump\" BACKWARDS from kdata_base ...\n");
+    long nfound = kekcall(KEKCALL_SCAN_DMEM, 64, (uintptr_t)g_finds, (uint64_t)-(64LL * 1024 * 1024));
+    klog_printf("[a53] scan: total=%ld, first 32:\n", nfound);
     for (int i = 0; i < 32; i++) {
-        klog_printf("[a53]   finds[%2d] = 0x%016llx\n", i, (unsigned long long)finds[i]);
+        klog_printf("[a53]   finds[%2d] = 0x%016llx\n", i, (unsigned long long)g_finds[i]);
     }
+
+    /* Если первый проход вернул 0 — пробуем ещё дальше назад */
+    if (nfound == 0) {
+        klog_puts("[a53] not found at -64MB, trying -128MB..-64MB range ...\n");
+        for (int i = 0; i < 32; i++) g_finds[i] = 0;
+        nfound = kekcall(KEKCALL_SCAN_DMEM, 64, (uintptr_t)g_finds, (uint64_t)-(128LL * 1024 * 1024));
+        klog_printf("[a53] scan2: total=%ld, first 32:\n", nfound);
+        for (int i = 0; i < 32; i++) {
+            klog_printf("[a53]   finds2[%2d] = 0x%016llx\n", i, (unsigned long long)g_finds[i]);
+        }
+    }
+
     return (nfound > 0) ? 0 : -1;
 }
 
