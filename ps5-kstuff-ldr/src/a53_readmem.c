@@ -61,36 +61,41 @@ a53_find_profile(uint32_t fw, uint32_t cond)
 
 
 int
-step_final(void)
+step_rodata_hunt(void)
 {
-    /* [A] Подтвердить .text — dump stub по 0x92995199 */
+    /* [1] РАСШИРИТЬ .rodata вокруг "mp4/dump": ищем "mp4_cdev_open" или "mp4_open" */
+    uint64_t str_mp4_dump = 0xffffffff903138aaULL;
+    /* dump 4 KB после mp4/dump (вперёд) */
+    for (int chunk = 0; chunk < 4; chunk++) {
+        uint64_t base = (str_mp4_dump + chunk * 1024) & ~7ULL;
+        uint8_t buf[1024];
+        for (int i = 0; i < 1024; i++) buf[i] = 0;
+        long r = kekcall(KEKCALL_DUMP_MEM, base, (uintptr_t)buf, 1024);
+        klog_printf("[RD] chunk %d base=0x%llx ret=%ld\n", chunk, (unsigned long long)base, r);
+        /* ищем "mp4" в буфере */
+        for (int i = 0; i + 16 < 1024; i++) {
+            if (buf[i]=='m' && buf[i+1]=='p' && buf[i+2]=='4' && buf[i+3]=='_') {
+                /* нашли mp4_ — печатаем имя */
+                klog_printf("[RD] @ 0x%llx: ", (unsigned long long)(base + i));
+                int j = 0;
+                while (j < 48 && buf[i+j] >= 32 && buf[i+j] < 127) {
+                    klog_printf("%c", buf[i+j]);
+                    j++;
+                }
+                klog_printf("\n");
+            }
+        }
+    }
+    
+    /* [2] Проверить 0x8f сегмент — последний невыясненный кандидат */
     {
-        uint64_t addr = 0xffffffff92995199ULL;
+        uint64_t addr = 0xffffffff8f2ea920ULL;
         uint8_t buf[128];
         for (int i = 0; i < 128; i++) buf[i] = 0;
         long r = kekcall(KEKCALL_DUMP_MEM, addr, (uintptr_t)buf, 128);
-        klog_printf("[TEXT] 0x%llx ret=%ld\n", (unsigned long long)addr, r);
+        klog_printf("[8F] 0x%llx ret=%ld\n", (unsigned long long)addr, r);
         for (int i = 0; i < 128; i += 16) {
-            klog_printf("[TEXT] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                i,
-                buf[i], buf[i+1], buf[i+2], buf[i+3], buf[i+4], buf[i+5], buf[i+6], buf[i+7],
-                buf[i+8], buf[i+9], buf[i+10], buf[i+11], buf[i+12], buf[i+13], buf[i+14], buf[i+15]);
-        }
-    }
-
-    /* [B] Поиск "mp4" строки в .rodata — найти РЯДОМ со строкой "mp4/dump" 
-     *     есть ли короткая "mp4\0" которую может использовать cdev */
-    {
-        /* Сначала scan .rodata около str_addr "mp4/dump" для адресов других mp4 строк */
-        uint64_t str_mp4_dump = 0xffffffff903138aaULL;
-        /* Dump 512 bytes BEFORE str_addr — обычно соседние строки драйвера рядом */
-        uint64_t base = (str_mp4_dump - 512) & ~7ULL;
-        uint8_t buf[512];
-        for (int i = 0; i < 512; i++) buf[i] = 0;
-        long r = kekcall(KEKCALL_DUMP_MEM, base, (uintptr_t)buf, 512);
-        klog_printf("[RODATA] 0x%llx ret=%ld\n", (unsigned long long)base, r);
-        for (int i = 0; i < 512; i += 16) {
-            klog_printf("[RODATA] +0x%03x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x | %c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c\n",
+            klog_printf("[8F] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x | %c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c\n",
                 i,
                 buf[i], buf[i+1], buf[i+2], buf[i+3], buf[i+4], buf[i+5], buf[i+6], buf[i+7],
                 buf[i+8], buf[i+9], buf[i+10], buf[i+11], buf[i+12], buf[i+13], buf[i+14], buf[i+15],
@@ -118,7 +123,7 @@ step_final(void)
 int
 probe_mp4_device(void)
 {
-    step_final();
+    step_rodata_hunt();
     return 0;
 }
 
