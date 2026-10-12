@@ -686,6 +686,31 @@ find_and_patch_mp4_cdevsw(void)
     if (mp4_parent_csw) {
         klog_printf("[WALK] Confirmed mp4 node '%s' under parent csw 0x%llx\n",
                     mp4_node_name, (unsigned long long)mp4_parent_csw);
+
+        /* Проверяем открытие реального узла /dev/mp4/dump_for_decid! */
+        klog_printf("[TEST_OPEN] 1. raw open(\"/dev/mp4/dump_for_decid\", O_RDWR)...\n");
+        int rfd1 = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
+        int rerr1 = errno;
+        klog_printf("[TEST_OPEN] raw open result: fd=%d errno=%d\n", rfd1, rerr1);
+        if (rfd1 >= 0) {
+            klog_printf("[TEST_OPEN] *** SUCCESS! RAW OPEN SUCCEEDED! fd=%d ***\n", rfd1);
+            close(rfd1);
+        }
+
+        /* Проверяем открытие с root ucred через SWAP_FULL */
+        klog_printf("[TEST_OPEN] 2. with SWAP_FULL root ucred...\n");
+        uint64_t bkp[4] = {0};
+        long sr = kekcall(KEKCALL_SWAP_FULL, 1, (uintptr_t)bkp, 0);
+        int rfd2 = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
+        int rerr2 = errno;
+        klog_printf("[TEST_OPEN] with-swap open result: fd=%d errno=%d (swap_ret=%ld)\n", rfd2, rerr2, sr);
+        if (sr == 0) {
+            kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)bkp, 0);
+        }
+        if (rfd2 >= 0) {
+            klog_printf("[TEST_OPEN] *** SUCCESS! /dev/mp4/dump_for_decid OPENED WITH ROOT UCRED! fd=%d ***\n", rfd2);
+            close(rfd2);
+        }
     } else {
         klog_printf("[WALK] Notice: no node with 'mp4' or 'dump' in name was encountered.\n");
     }
