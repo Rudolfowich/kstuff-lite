@@ -121,59 +121,70 @@ step_rodata_hunt(void)
 }
 
 int
-confirm_mp4_text(const uint64_t *ext_buf)
+xref_scan_text(void)
 {
-    /* Извлекаем 4 ioctl handler'а: ext[76], ext[80], ext[84], ext[88] */
-    uint64_t handlers[4];
-    if (ext_buf && ext_buf[76] && ext_buf[80]) {
-        handlers[0] = ext_buf[76];
-        handlers[1] = ext_buf[80];
-        handlers[2] = ext_buf[84];
-        handlers[3] = ext_buf[88];
-    } else {
-        handlers[0] = 0xffffffff9100eac9ULL;
-        handlers[1] = 0xffffffff91057a0cULL;
-        handlers[2] = 0xffffffff91062147ULL;
-        handlers[3] = 0xffffffff9100ead6ULL;
+    /* Динамический адрес строки "mp4/dump" для текущей сессии KASLR */
+    uint64_t str_mp4 = 0;
+    static uint64_t g_str[32];
+    for (int i = 0; i < 32; i++) g_str[i] = 0;
+    kekcall(KEKCALL_SCAN_DMEM, 32, (uintptr_t)g_str, 0);
+    for (int i = 0; i < 32; i++) {
+        if (g_str[i] && (g_str[i] & 0xff) == 0xaa) {
+            str_mp4 = g_str[i];
+            break;
+        }
+    }
+    if (!str_mp4) {
+        str_mp4 = 0xffffffff90fe38aaULL;
     }
 
-    for (int h = 0; h < 4; h++) {
-        /* Dump 128 bytes вокруг handler'а (-64 .. +64) */
-        uint64_t addr = handlers[h];
-        uint64_t base = (addr - 64) & ~7ULL;
+    uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
 
-        uint8_t buf[128];
-        for (int i = 0; i < 128; i++) buf[i] = 0;
+    /* .text основного ядра: от (kbase - 0xB00000) до kbase. Это ровно 11 МБ */
+    uint64_t text_start = kbase - 0xB00000ULL;
+    uint64_t text_end   = kbase;
 
-        long r = kekcall(KEKCALL_DUMP_MEM, base, (uintptr_t)buf, 128);
-        klog_printf("[H%d] handler @ 0x%llx (dump base 0x%llx) ret=%ld\n",
-                    h, (unsigned long long)addr,
-                    (unsigned long long)base, r);
+    klog_printf("[XR] kdata_base = 0x%llx, scan .text 0x%llx..0x%llx for xref to 0x%llx\n",
+                (unsigned long long)kbase,
+                (unsigned long long)text_start,
+                (unsigned long long)text_end,
+                (unsigned long long)str_mp4);
 
-        for (int i = 0; i < 128; i += 16) {
-            klog_printf("[H%d] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x | %c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c\n",
-                h, i,
-                buf[i], buf[i+1], buf[i+2], buf[i+3],
-                buf[i+4], buf[i+5], buf[i+6], buf[i+7],
-                buf[i+8], buf[i+9], buf[i+10], buf[i+11],
-                buf[i+12], buf[i+13], buf[i+14], buf[i+15],
-                (buf[i]>=32&&buf[i]<127)?buf[i]:'.',
-                (buf[i+1]>=32&&buf[i+1]<127)?buf[i+1]:'.',
-                (buf[i+2]>=32&&buf[i+2]<127)?buf[i+2]:'.',
-                (buf[i+3]>=32&&buf[i+3]<127)?buf[i+3]:'.',
-                (buf[i+4]>=32&&buf[i+4]<127)?buf[i+4]:'.',
-                (buf[i+5]>=32&&buf[i+5]<127)?buf[i+5]:'.',
-                (buf[i+6]>=32&&buf[i+6]<127)?buf[i+6]:'.',
-                (buf[i+7]>=32&&buf[i+7]<127)?buf[i+7]:'.',
-                (buf[i+8]>=32&&buf[i+8]<127)?buf[i+8]:'.',
-                (buf[i+9]>=32&&buf[i+9]<127)?buf[i+9]:'.',
-                (buf[i+10]>=32&&buf[i+10]<127)?buf[i+10]:'.',
-                (buf[i+11]>=32&&buf[i+11]<127)?buf[i+11]:'.',
-                (buf[i+12]>=32&&buf[i+12]<127)?buf[i+12]:'.',
-                (buf[i+13]>=32&&buf[i+13]<127)?buf[i+13]:'.',
-                (buf[i+14]>=32&&buf[i+14]<127)?buf[i+14]:'.',
-                (buf[i+15]>=32&&buf[i+15]<127)?buf[i+15]:'.');
+    /* 11 chunks по 1 MB + delay 1 sec */
+    for (int chunk = 0; chunk < 11; chunk++) {
+        uint64_t cs = text_start + chunk * 1024ULL * 1024ULL;
+        if (cs >= text_end) break;
+
+        uint64_t finds[16] = {0};
+        long n = kekcall(KEKCALL_SCAN_XREF_V2, str_mp4, (uintptr_t)finds, cs);
+        klog_printf("[XR] chunk %d @ 0x%llx: %ld xrefs\n",
+                    chunk, (unsigned long long)cs, n);
+
+        if (n > 0) {
+            for (int i = 0; i < 16; i++) {
+                if (finds[i]) {
+                    uint64_t rip = finds[i];
+                    klog_printf("[XR]   xref @ 0x%llx\n", (unsigned long long)rip);
+
+                    /* Dump 128 bytes вокруг xref (-64 .. +64) для проверки пролога и контекста */
+                    uint64_t base = (rip - 64) & ~7ULL;
+                    uint8_t buf[128];
+                    for (int b = 0; b < 128; b++) buf[b] = 0;
+                    if (kekcall(KEKCALL_DUMP_MEM, base, (uintptr_t)buf, 128) == 0) {
+                        klog_printf("[XR]   code dump @ 0x%llx:\n", (unsigned long long)base);
+                        for (int b = 0; b < 128; b += 16) {
+                            klog_printf("[XR]     +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                b,
+                                buf[b], buf[b+1], buf[b+2], buf[b+3],
+                                buf[b+4], buf[b+5], buf[b+6], buf[b+7],
+                                buf[b+8], buf[b+9], buf[b+10], buf[b+11],
+                                buf[b+12], buf[b+13], buf[b+14], buf[b+15]);
+                        }
+                    }
+                }
+            }
         }
+        sleep(1);  /* heartbeat */
     }
     return 0;
 }
@@ -181,7 +192,7 @@ confirm_mp4_text(const uint64_t *ext_buf)
 int
 probe_mp4_device(void)
 {
-    /* Вызывается из install_ppr_a53, где ext_buf уже получен */
+    xref_scan_text();
     return 0;
 }
 
