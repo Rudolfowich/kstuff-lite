@@ -503,6 +503,39 @@ scan_cdevsw(void)
         klog_printf("[ICC] failed to dump icc_configuration\n");
     }
 
+    /* Шаг #0: Диагностический дамп 128 байт struct cdev (icc0 / icc_configuration) */
+    klog_printf("[CDEV0] dumping 128 bytes of struct cdev @ 0xffff937101989200:\n");
+    uint8_t cdev_buf[128] = {0};
+    g_sigsys_fault = 0;
+    if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
+        kekcall(KEKCALL_DUMP_MEM, 0xffff937101989200ULL, (uintptr_t)cdev_buf, 128);
+        for (int off = 0; off < 128; off += 8) {
+            uint64_t v = 0;
+            __builtin_memcpy(&v, cdev_buf + off, 8);
+
+            /* Пробуем прочитать первые 16 байт строки, если это валидный указатель ядра/кучи */
+            char preview[16] = {0};
+            if ((v & 0xFFFF000000000000ULL) == 0xFFFF000000000000ULL) {
+                g_sigsys_fault = 0;
+                if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
+                    uint64_t s_words[2] = {0};
+                    kekcall(KEKCALL_DUMP_MEM, v, (uintptr_t)s_words, 16);
+                    memcpy(preview, s_words, 15);
+                    for (int k = 0; k < 15; k++) {
+                        if (preview[k] < 32 || preview[k] > 126) { preview[k] = 0; break; }
+                    }
+                }
+            }
+            if (preview[0]) {
+                klog_printf("[CDEV0] +0x%02x = 0x%016llx  str='%s'\n", off, (unsigned long long)v, preview);
+            } else {
+                klog_printf("[CDEV0] +0x%02x = 0x%016llx\n", off, (unsigned long long)v);
+            }
+        }
+    } else {
+        klog_printf("[CDEV0] failed to dump struct cdev\n");
+    }
+
     /* Восстанавливаем дефолтный обработчик SIGSYS */
     signal(SIGSYS, SIG_DFL);
 
