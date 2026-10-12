@@ -927,6 +927,7 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     /* Шаг 4: патчим все найденные mp4 cdevsw */
     for (int m = 0; m < mp4_count; m++) {
         uint64_t target_csw = mp4_parent_csws[m];
+        if (!target_csw) continue;
         uint64_t orig_dopen = 0;
         kekcall(KEKCALL_DUMP_MEM, target_csw + 0x10ULL, (uintptr_t)&orig_dopen, 8);
         klog_printf("[STEP4] patching mp4 csw[%d] 0x%llx (node '%s'): orig=0x%llx -> null_dopen=0x%llx...\n",
