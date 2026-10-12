@@ -96,11 +96,11 @@ probe_mp4_device(void)
         }
     }
 
-    /* Scan xref: кто ссылается на эти адреса */
+    /* Scan xref: кто ссылается на эти адреса (сканируем 16MB НАЗАД в .text) */
     for (int a = 0; a < count; a++) {
         for (int i = 0; i < 32; i++) g_xref[i] = 0;
-        klog_printf("[a53] === xref to 0x%llx ===\n", (unsigned long long)str_addrs[a]);
-        long nref = kekcall(KEKCALL_SCAN_XREF, str_addrs[a], (uintptr_t)g_xref, 16);
+        klog_printf("[a53] === xref to 0x%llx (backward 16MB) ===\n", (unsigned long long)str_addrs[a]);
+        long nref = kekcall(KEKCALL_SCAN_XREF, str_addrs[a], (uintptr_t)g_xref, (uint64_t)-16LL);
         klog_printf("[a53] xref total=%ld\n", nref);
         for (int i = 0; i < 32 && g_xref[i]; i++) {
             klog_printf("[a53]   xref[%d] = 0x%016llx\n", i, (unsigned long long)g_xref[i]);

@@ -501,36 +501,38 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
     }
     else if(nr == 20)
     {
-        /* SCAN_XREF: искать 32-битные смещения которые при rip-relative дают
-         * один из target адресов. args[RDI] = target (кого ищем ссылкой),
-         * args[RSI] = user_buf, args[RDX] = scan_mb (default 16) */
         uint64_t target = args[RDI];
         uint64_t user_buf = args[RSI];
-        uint64_t scan_mb = args[RDX];
+        int64_t scan_mb_signed = (int64_t)args[RDX];  /* <0 = назад, >0 = вперёд */
         if (!target || !user_buf) return 1;
-        if (scan_mb == 0 || scan_mb > 128) scan_mb = 16;
+
+        uint64_t scan_abs = (scan_mb_signed < 0) ? -scan_mb_signed : scan_mb_signed;
+        if (scan_abs == 0 || scan_abs > 128) scan_abs = 16;
 
         extern char kdata_base[];
         uint64_t kbase = (uint64_t)kdata_base;
-        uint64_t scan_bytes = scan_mb * 1024ULL * 1024ULL;
+        uint64_t start = (scan_mb_signed < 0) 
+                         ? kbase - (scan_abs * 1024ULL * 1024ULL) 
+                         : kbase;
+        uint64_t scan_bytes = scan_abs * 1024ULL * 1024ULL;
 
         uint64_t finds[32] = {0};
         unsigned nfound = 0;
         unsigned total = 0;
         uint8_t buf[128];
 
-        for (uint64_t off = 0; off + 8 < scan_bytes; off += 120) {
-            if (copy_from_kernel(buf, kbase + off, 128) != 0) continue;
+        for (uint64_t off = 0; off + 4 < scan_bytes; off += 120) {
+            if (copy_from_kernel(buf, start + off, 128) != 0) continue;
             for (unsigned i = 0; i + 4 <= 128; i++) {
                 int32_t disp;
                 __builtin_memcpy(&disp, buf + i, 4);
-                uint64_t rip_after = kbase + off + i + 4;
+                uint64_t rip_after = start + off + i + 4;
                 if ((rip_after + (int64_t)disp) == target) {
                     total++;
                     if (nfound < 32) {
                         log_word(0xBB00000000000000ULL | (uint64_t)nfound);
-                        log_word(kbase + off + i);
-                        finds[nfound++] = kbase + off + i;
+                        log_word(start + off + i);
+                        finds[nfound++] = start + off + i;
                     }
                 }
             }
