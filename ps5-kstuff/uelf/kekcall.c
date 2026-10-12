@@ -430,6 +430,48 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = 0;
         return 0;
     }
+    else if(nr == 18)
+    {
+        /* SCAN_DMEM_FOR_STRING: ищем "/dev/mp4" в ядре.
+         * args[RDI] = scan_mb (размер скана, в МБ; default 32)
+         * args[RSI] = user_buf (uint64_t[32] для адресов находок)
+         * return: число находок */
+        uint64_t user_buf = args[RSI];
+        uint64_t scan_mb = args[RDI];
+        if (!user_buf) return 1;
+        if (scan_mb == 0 || scan_mb > 256) scan_mb = 32;
+
+        extern char kdata_base[];
+        uint64_t kbase = (uint64_t)kdata_base;
+        uint64_t scan_bytes = scan_mb * 1024ULL * 1024ULL;
+
+        /* Pattern: "/dev/mp4" little-endian u64 */
+        const uint64_t needle = 0x34706d2f7665642fULL;
+
+        uint64_t finds[32] = {0};
+        unsigned nfound = 0;
+
+        #define CHUNK 0x1000
+        uint8_t buf[CHUNK];
+
+        for (uint64_t off = 0; off + 8 < scan_bytes && nfound < 32; off += CHUNK - 8) {
+            if (copy_from_kernel(buf, kbase + off, CHUNK) != 0) continue;
+            for (unsigned i = 0; i + 8 <= CHUNK; i++) {
+                uint64_t v;
+                __builtin_memcpy(&v, buf + i, 8);
+                if (v == needle) {
+                    finds[nfound++] = kbase + off + i;
+                    if (nfound >= 32) break;
+                }
+            }
+        }
+
+        if (copy_to_kernel(user_buf, finds, sizeof(finds)))
+            return EFAULT;
+
+        args[RAX] = nfound;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;

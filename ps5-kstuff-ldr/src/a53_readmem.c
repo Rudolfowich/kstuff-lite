@@ -59,33 +59,14 @@ a53_find_profile(uint32_t fw, uint32_t cond)
 int
 probe_mp4_device(void)
 {
-    klog_puts("[a53] brute-force FULL swap (ucred+p_ucred+p_fd) pid 1..255 ...\n");
-
-    for (int pid = 1; pid < 256; pid++) {
-        uint64_t backup[4] = {0};
-        long r = kekcall(KEKCALL_SWAP_FULL, (uint64_t)pid,
-                         (uintptr_t)backup, 0);
-        if (r != 0) {
-            /* pid not found or t_fd==NULL — skip */
-            continue;
-        }
-
-        int fd = open(MP4_DEV_PATH, O_RDWR);
-        int saved_errno = errno;
-
-        /* Always restore immediately */
-        kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)backup, 0);
-
-        if (fd >= 0) {
-            close(fd);
-            klog_printf("[a53] ★ pid=%d FULL swap OPENS /dev/mp4/dump ★\n", pid);
-            return 0;
-        }
-        klog_printf("[a53] pid=%d errno=%d\n", pid, saved_errno);
+    uint64_t finds[32] = {0};
+    klog_puts("[a53] scanning kernel for \"/dev/mp4\" string ...\n");
+    long nfound = kekcall(KEKCALL_SCAN_DMEM, 32 /* MB */, (uintptr_t)finds, 0);
+    klog_printf("[a53] scan found %ld occurrences in first 32MB\n", nfound);
+    for (int i = 0; i < 32 && finds[i]; i++) {
+        klog_printf("[a53] mp4_str[%d] = 0x%016llx\n", i, (unsigned long long)finds[i]);
     }
-
-    klog_puts("[a53] FULL swap also failed — need to patch mp4_cdev_open directly\n");
-    return -1;
+    return (nfound > 0) ? 0 : -1;
 }
 
 /* ---- Main install entry --------------------------------------------- */
