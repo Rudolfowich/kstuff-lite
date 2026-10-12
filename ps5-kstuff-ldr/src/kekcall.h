@@ -18,6 +18,7 @@
 #define KEKCALL_SCAN_XREF_V2      22
 #define KEKCALL_SCAN_PTR_CUSTOM   23
 #define KEKCALL_GET_KBASE         24
+#define KEKCALL_SAFE_PEEK         25
 
 static inline long
 kekcall(uint32_t nr, uint64_t a1, uint64_t a2, uint64_t a3)

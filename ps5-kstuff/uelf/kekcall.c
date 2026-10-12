@@ -669,6 +669,17 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = (uint64_t)kdata_base;
         return 0;
     }
+    else if(nr == 25)
+    {
+        /* SAFE_PEEK: probe kernel address with kpeek64_checked */
+        uint64_t kaddr = args[RDI];
+        uint64_t user_out = args[RSI];
+        uint64_t val = 0;
+        if (kpeek64_checked(kaddr, &val) != 0) return EFAULT;
+        if (user_out && copy_to_kernel(user_out, &val, 8) != 0) return EFAULT;
+        args[RAX] = 0;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;

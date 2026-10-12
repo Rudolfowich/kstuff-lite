@@ -121,7 +121,7 @@ step_rodata_hunt(void)
 }
 
 int
-xref_scan_text(void)
+smart_xref_scan(void)
 {
     /* Динамический адрес строки "mp4/dump" для текущей сессии KASLR */
     uint64_t str_mp4 = 0;
@@ -140,8 +140,9 @@ xref_scan_text(void)
 
     uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
 
-    /* .text основного ядра: от (kbase - 0xB00000) до kbase. Это ровно 11 МБ */
-    uint64_t text_start = kbase - 0xB00000ULL;
+    /* .text основного ядра: от (kbase - 0xA68000 & ~0xFFF) до kbase.
+     * Это гарантированно замапленный регион с copyin / doreti_iret. */
+    uint64_t text_start = (kbase - 0xA68000ULL) & ~0xFFFULL;
     uint64_t text_end   = kbase;
 
     klog_printf("[XR] kdata_base = 0x%llx, scan .text 0x%llx..0x%llx for xref to 0x%llx\n",
@@ -150,10 +151,17 @@ xref_scan_text(void)
                 (unsigned long long)text_end,
                 (unsigned long long)str_mp4);
 
-    /* 11 chunks по 1 MB + delay 1 sec */
-    for (int chunk = 0; chunk < 11; chunk++) {
+    for (int chunk = 0; chunk < 12; chunk++) {
         uint64_t cs = text_start + chunk * 1024ULL * 1024ULL;
         if (cs >= text_end) break;
+
+        /* SAFE PROBE: проверяем доступность адреса cs перед сканированием */
+        uint64_t probe = 0;
+        if (kekcall(KEKCALL_SAFE_PEEK, cs, (uintptr_t)&probe, 0) != 0) {
+            klog_printf("[XR] chunk %d @ 0x%llx: UNMAPPED, skip\n",
+                        chunk, (unsigned long long)cs);
+            continue;
+        }
 
         uint64_t finds[16] = {0};
         long n = kekcall(KEKCALL_SCAN_XREF_V2, str_mp4, (uintptr_t)finds, cs);
@@ -192,7 +200,7 @@ xref_scan_text(void)
 int
 probe_mp4_device(void)
 {
-    xref_scan_text();
+    smart_xref_scan();
     return 0;
 }
 
