@@ -212,6 +212,52 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = 0;
         return 0;
     }
+    else if(nr == 11)
+    {
+        /* Расширенная разведка: dump ucred целиком + расширенный dump proc.
+         * user_buf должен быть размером >= 0x600 байт (192 u64 слов) */
+        uint64_t td = regs[RDI];
+        uint64_t proc = 0;
+        uint64_t ucred = 0;
+        kpeek64_checked(td + 0x08, &proc);
+        kpeek64_checked(td + 0x140, &ucred);
+
+        uint64_t user_buf = args[RSI];
+        if (!user_buf) return EINVAL;
+
+        uint64_t tmp[192];
+        unsigned idx = 0;
+
+        /* Header: VAs */
+        tmp[idx++] = 0xDEADBEEF00000011ULL;
+        tmp[idx++] = td;
+        tmp[idx++] = proc;
+        tmp[idx++] = ucred;
+
+        /* ucred dump — 0x100 bytes = 32 u64 */
+        tmp[idx++] = 0x7563726564303030ULL;  /* "ucred000" */
+        for (unsigned off = 0; off < 0x100; off += 8) {
+            uint64_t v = 0;
+            kpeek64_checked(ucred + off, &v);
+            tmp[idx++] = v;
+        }
+
+        /* proc extended dump — 0x400 bytes = 128 u64 */
+        tmp[idx++] = 0x70726f635f657874ULL;  /* "proc_ext" */
+        for (unsigned off = 0; off < 0x400; off += 8) {
+            uint64_t v = 0;
+            kpeek64_checked(proc + off, &v);
+            tmp[idx++] = v;
+        }
+
+        tmp[idx++] = 0xDEADBEEF00000011ULL;
+
+        if (copy_to_kernel(user_buf, tmp, idx * sizeof(uint64_t)))
+            return EFAULT;
+
+        args[RAX] = (uint64_t)idx;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;

@@ -124,6 +124,17 @@ install_ppr_a53(uint32_t system_fw_version)
         }
     }
 
+    /* Расширенная разведка ucred и proc (kekcall 11) */
+    klog_puts("[a53] extended diagnostic dump (kekcall 11) ...\n");
+    uint64_t ext_buf[192] = {0};
+    long rc = kekcall(KEKCALL_EXT_DUMP, 0, (uint64_t)ext_buf, sizeof(ext_buf));
+    klog_printf("[a53] kekcall(11) ret=%ld\n", rc);
+    if (rc > 0) {
+        for (int i = 0; i < rc && i < 170; i++) {
+            klog_printf("[a53] ext[%d] = 0x%016llx\n", i, (unsigned long long)ext_buf[i]);
+        }
+    }
+
     /* Device probe */
     if (probe_mp4_device() != 0) {
         klog_puts("[a53] MP4 device not accessible — abort\n");
