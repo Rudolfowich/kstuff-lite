@@ -871,7 +871,11 @@ find_and_patch_mp4_cdevsw(void)
     klog_printf("[READ_TEST] Step 2 (.rodata @ 0x%llx): ret=%ld, str='%.16s'\n",
                 (unsigned long long)rodata_v, r_rodata, rodata_bytes);
 
-    /* Шаг 3: Микро-тест 1 байт .text (mp4_cdev_open) */
+    /* Шаг 3: Чтение .text (mp4_cdev_open) ЧЕРЕЗ KEKCALL_DUMP_PHYS (обход XOM!) */
+    unsigned long dmap_base = 0;
+    unsigned long cr3 = kernel_get_proc_cr3(-1, &dmap_base);
+    klog_printf("[DUMP_PHYS] cr3=0x%lx dmap_base=0x%lx\n", cr3, dmap_base);
+
     uint64_t mp4_csw0 = mp4_parent_csws[0];
     for (int m = 0; m < mp4_count; m++) {
         if (strstr(mp4_names[m], "dump")) mp4_csw0 = mp4_parent_csws[m];
@@ -880,19 +884,20 @@ find_and_patch_mp4_cdevsw(void)
     kekcall(KEKCALL_DUMP_MEM, mp4_csw0 + 0x20ULL, (uintptr_t)&mp4_dclose, 8);
     uint64_t text_v = mp4_dclose ? (mp4_dclose - 8) : 0xffffffff8f4dcf38ULL;
 
-    char text_byte[8] = {0};
-    klog_printf("[READ_TEST] Step 3: ABOUT to try .text 1 byte at 0x%llx\n", (unsigned long long)text_v);
-    long r_text = kekcall(KEKCALL_DUMP_MEM, text_v, (uintptr_t)text_byte, 1);
-    klog_printf("[READ_TEST] Step 3 (.text @ 0x%llx): ret=%ld, byte=0x%02x\n",
-                (unsigned long long)text_v, r_text, (unsigned char)text_byte[0]);
+    uint64_t phys_end = 0;
+    uint64_t phys_text = virt2phys(text_v, &phys_end, dmap_base, cr3);
+    klog_printf("[DUMP_PHYS] text_v=0x%llx -> phys_text=0x%llx\n",
+                (unsigned long long)text_v, (unsigned long long)phys_text);
 
-    if (r_text == 8 /* count*8 */ || r_text == 1 || (r_text == 0 && text_byte[0] != 0)) {
-        klog_printf("[READ_TEST] *** SUCCESS! 1 byte .text read without panic! Reading 128 bytes... ***\n");
+    if (phys_text != (uint64_t)-1) {
         uint8_t text_code[128] = {0};
-        kekcall(KEKCALL_DUMP_MEM, text_v, (uintptr_t)text_code, 128);
-        klog_printf("[READ_TEST] === 128 bytes of mp4_cdev_open @ 0x%llx ===\n", (unsigned long long)text_v);
+        long r_phys = kekcall(KEKCALL_DUMP_PHYS, phys_text, (uintptr_t)text_code, 128);
+        klog_printf("[DUMP_PHYS] KEKCALL_DUMP_PHYS ret=%ld\n", r_phys);
+
+        klog_printf("[DUMP_PHYS] === 128 bytes of mp4_cdev_open (PHYS 0x%llx) ===\n",
+                    (unsigned long long)phys_text);
         for (int b = 0; b < 128; b += 16) {
-            klog_printf("[READ_TEST] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            klog_printf("[DUMP_PHYS] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
                         b,
                         text_code[b+0], text_code[b+1], text_code[b+2], text_code[b+3],
                         text_code[b+4], text_code[b+5], text_code[b+6], text_code[b+7],

@@ -803,6 +803,25 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = 0;
         return 0;
     }
+    else if(nr == 28)
+    {
+        /* DUMP_PHYS: read raw physical memory via DMEM mapping (bypasses XOM).
+         * args[RDI] = physical address (uint64_t)
+         * args[RSI] = userland buffer (uint64_t)
+         * args[RDX] = nbytes (max 4096) */
+        uint64_t phys = args[RDI];
+        uint64_t user_buf = args[RSI];
+        uint64_t nbytes = args[RDX];
+        if (!user_buf) return 1;
+        if (nbytes == 0 || nbytes > 4096) nbytes = 4096;
+
+        /* Читаем напрямую из физического маппинга DMEM */
+        if (copy_to_kernel(user_buf, DMEM + phys, nbytes) != 0)
+            return EFAULT;
+
+        args[RAX] = nbytes;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;
