@@ -97,10 +97,13 @@ struct ppr_profile
  */
 static const struct ppr_profile* get_ppr_profile(void)
 {
-    /* Keep the newer profiles and offsets available for later work, but do
-     * not arm plaintext PPR interception above 11.60. */
+#ifdef KSTUFF_FPKG_EXPERIMENT
+    if(FWVER < 0x1300 || FWVER > 0x1360)
+        return NULL;
+#else
     if(FWVER > 0x1160)
         return NULL;
+#endif
 
     static const struct ppr_profile fw1_early = {
         0x126, 0x15a,
