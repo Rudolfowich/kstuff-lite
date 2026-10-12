@@ -479,6 +479,69 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = total;
         return 0;
     }
+    else if(nr == 19)
+    {
+        /* DUMP_KERNEL_MEMORY: dump 64 u64 (512 байт) вокруг target адреса.
+         * args[RDI] = target address
+         * args[RSI] = user_buf (uint64_t[64]) */
+        uint64_t target = args[RDI];
+        uint64_t user_buf = args[RSI];
+        if (!target || !user_buf) return 1;
+
+        uint64_t data[64] = {0};
+        for (int i = 0; i < 64; i++) {
+            uint64_t v = 0;
+            kpeek64_checked(target - 256 + i*8, &v);
+            data[i] = v;
+        }
+
+        if (copy_to_kernel(user_buf, data, sizeof(data)) != 0)
+            return EFAULT;
+        args[RAX] = 64;
+        return 0;
+    }
+    else if(nr == 20)
+    {
+        /* SCAN_XREF: искать 32-битные смещения которые при rip-relative дают
+         * один из target адресов. args[RDI] = target (кого ищем ссылкой),
+         * args[RSI] = user_buf, args[RDX] = scan_mb (default 16) */
+        uint64_t target = args[RDI];
+        uint64_t user_buf = args[RSI];
+        uint64_t scan_mb = args[RDX];
+        if (!target || !user_buf) return 1;
+        if (scan_mb == 0 || scan_mb > 128) scan_mb = 16;
+
+        extern char kdata_base[];
+        uint64_t kbase = (uint64_t)kdata_base;
+        uint64_t scan_bytes = scan_mb * 1024ULL * 1024ULL;
+
+        uint64_t finds[32] = {0};
+        unsigned nfound = 0;
+        unsigned total = 0;
+        uint8_t buf[128];
+
+        for (uint64_t off = 0; off + 8 < scan_bytes; off += 120) {
+            if (copy_from_kernel(buf, kbase + off, 128) != 0) continue;
+            for (unsigned i = 0; i + 4 <= 128; i++) {
+                int32_t disp;
+                __builtin_memcpy(&disp, buf + i, 4);
+                uint64_t rip_after = kbase + off + i + 4;
+                if ((rip_after + (int64_t)disp) == target) {
+                    total++;
+                    if (nfound < 32) {
+                        log_word(0xBB00000000000000ULL | (uint64_t)nfound);
+                        log_word(kbase + off + i);
+                        finds[nfound++] = kbase + off + i;
+                    }
+                }
+            }
+        }
+
+        if (copy_to_kernel(user_buf, finds, sizeof(finds)) != 0)
+            return EFAULT;
+        args[RAX] = total;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;

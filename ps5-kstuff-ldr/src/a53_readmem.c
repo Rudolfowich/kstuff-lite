@@ -56,19 +56,41 @@ a53_find_profile(uint32_t fw, uint32_t cond)
 
 /* ---- MP4 device probe ------------------------------------------------ */
 
-static uint64_t g_finds[32];
+#define KEKCALL_DUMP_MEM   19
+#define KEKCALL_SCAN_XREF  20
+
+static uint64_t g_dump[64];
+static uint64_t g_xref[32];
 
 int
 probe_mp4_device(void)
 {
-    for (int i = 0; i < 32; i++) g_finds[i] = 0;
-    klog_puts("[a53] scan 32MB forward from kdata_base for \"mp4/dump\" ...\n");
-    long nfound = kekcall(KEKCALL_SCAN_DMEM, 32, (uintptr_t)g_finds, 0 /* use kdata_base */);
-    klog_printf("[a53] scan: total=%ld\n", nfound);
-    for (int i = 0; i < 32; i++) {
-        klog_printf("[a53]   finds[%2d] = 0x%016llx\n", i, (unsigned long long)g_finds[i]);
+    uint64_t str_addrs[2] = { 0xffffffffd99f4f61ULL, 0xffffffffd9a138aaULL };
+
+    /* Dump окружения вокруг обоих */
+    for (int a = 0; a < 2; a++) {
+        for (int i = 0; i < 64; i++) g_dump[i] = 0;
+        klog_printf("[a53] === dump around 0x%llx ===\n", (unsigned long long)str_addrs[a]);
+        kekcall(KEKCALL_DUMP_MEM, str_addrs[a], (uintptr_t)g_dump, 0);
+        for (int i = 0; i < 64; i++) {
+            klog_printf("[a53]   [%2d] 0x%016llx (addr=0x%llx)\n",
+                        i - 32, (unsigned long long)g_dump[i],
+                        (unsigned long long)(str_addrs[a] - 256 + i*8));
+        }
     }
-    return (nfound > 0) ? 0 : -1;
+
+    /* Scan xref: кто ссылается на эти адреса */
+    for (int a = 0; a < 2; a++) {
+        for (int i = 0; i < 32; i++) g_xref[i] = 0;
+        klog_printf("[a53] === xref to 0x%llx ===\n", (unsigned long long)str_addrs[a]);
+        long nref = kekcall(KEKCALL_SCAN_XREF, str_addrs[a], (uintptr_t)g_xref, 16);
+        klog_printf("[a53] xref total=%ld\n", nref);
+        for (int i = 0; i < 32 && g_xref[i]; i++) {
+            klog_printf("[a53]   xref[%d] = 0x%016llx\n", i, (unsigned long long)g_xref[i]);
+        }
+    }
+
+    return 0;
 }
 
 /* ---- Main install entry --------------------------------------------- */
