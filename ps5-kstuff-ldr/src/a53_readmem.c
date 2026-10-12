@@ -503,15 +503,24 @@ scan_cdevsw(void)
         klog_printf("[ICC] failed to dump icc_configuration\n");
     }
 
-    /* Шаг #0: Диагностический дамп 128 байт struct cdev (icc0 / icc_configuration) */
-    klog_printf("[CDEV0] dumping 128 bytes of struct cdev @ 0xffff937101989200:\n");
-    uint8_t cdev_buf[128] = {0};
+    /* Шаг #0: Диагностический дамп 256 байт struct cdev (icc0 / icc_configuration) */
+    klog_printf("[CDEV0] dumping 256 bytes of struct cdev @ 0xffff937101989200:\n");
+    uint8_t cdev_buf[256] = {0};
     g_sigsys_fault = 0;
     if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
-        kekcall(KEKCALL_DUMP_MEM, 0xffff937101989200ULL, (uintptr_t)cdev_buf, 128);
-        for (int off = 0; off < 128; off += 8) {
+        kekcall(KEKCALL_DUMP_MEM, 0xffff937101989200ULL, (uintptr_t)cdev_buf, 256);
+        for (int off = 0; off < 256; off += 8) {
             uint64_t v = 0;
             __builtin_memcpy(&v, cdev_buf + off, 8);
+
+            /* Проверяем, не лежит ли строка прямо inline внутри буфера cdev (например __si_namebuf) */
+            char inline_str[9] = {0};
+            __builtin_memcpy(inline_str, cdev_buf + off, 8);
+            int is_inline_ascii = 1;
+            for (int k = 0; k < 8; k++) {
+                if (inline_str[k] == 0) break;
+                if (inline_str[k] < 32 || inline_str[k] > 126) { is_inline_ascii = 0; break; }
+            }
 
             /* Пробуем прочитать первые 16 байт строки, если это валидный указатель ядра/кучи */
             char preview[16] = {0};
@@ -526,8 +535,11 @@ scan_cdevsw(void)
                     }
                 }
             }
+
             if (preview[0]) {
-                klog_printf("[CDEV0] +0x%02x = 0x%016llx  str='%s'\n", off, (unsigned long long)v, preview);
+                klog_printf("[CDEV0] +0x%02x = 0x%016llx  ptr_str='%s'\n", off, (unsigned long long)v, preview);
+            } else if (is_inline_ascii && inline_str[0] >= 'a' && inline_str[0] <= 'z') {
+                klog_printf("[CDEV0] +0x%02x = 0x%016llx  inline='%s'\n", off, (unsigned long long)v, inline_str);
             } else {
                 klog_printf("[CDEV0] +0x%02x = 0x%016llx\n", off, (unsigned long long)v);
             }
