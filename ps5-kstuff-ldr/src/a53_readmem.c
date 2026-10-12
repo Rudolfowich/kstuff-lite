@@ -121,12 +121,58 @@ step_rodata_hunt(void)
 }
 
 int
+find_mp4_cdev_in_data(void)
+{
+    /* 1. Находим точный адрес строки "mp4/dump" для текущей сессии KASLR */
+    uint64_t target = 0;
+    static uint64_t g_str[32];
+    for (int i = 0; i < 32; i++) g_str[i] = 0;
+    kekcall(KEKCALL_SCAN_DMEM, 32, (uintptr_t)g_str, 0);
+    for (int i = 0; i < 32; i++) {
+        if (g_str[i] && (g_str[i] & 0xff) == 0xaa) {
+            target = g_str[i];
+            break;
+        }
+    }
+    if (!target) {
+        /* fallback на ранее найденный offset если scan не сработал */
+        target = 0xffffffff903138aaULL;
+    }
+
+    uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+    uint64_t data_start = kbase;
+
+    klog_printf("[FIND] kdata_base = 0x%llx, searching .data for ptr to 0x%llx\n",
+                (unsigned long long)data_start, (unsigned long long)target);
+
+    /* 16 MB от kdata_base по 1 MB за чанк */
+    for (int chunk = 0; chunk < 16; chunk++) {
+        uint64_t cs = data_start + chunk * 1024ULL * 1024ULL;
+        uint64_t finds[32] = {0};
+
+        /* KEKCALL_SCAN_PTR_CUSTOM: user_buf, needle, scan_mb (1), start_param (cs) */
+        long n = kekcall5(KEKCALL_SCAN_PTR_CUSTOM, (uintptr_t)finds, target, 1, cs);
+
+        klog_printf("[FIND] chunk %d @ 0x%llx: %ld ptrs\n",
+                    chunk, (unsigned long long)cs, n);
+
+        if (n > 0) {
+            for (int i = 0; i < 16; i++) {
+                if (finds[i]) {
+                    klog_printf("[FIND]   ptr @ 0x%llx\n", (unsigned long long)finds[i]);
+                }
+            }
+        }
+
+        sleep(1);  /* heartbeat */
+    }
+    return 0;
+}
+
+int
 probe_mp4_device(void)
 {
-    uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
-    klog_printf("[KBASE] kernel_base (kdata_base) = 0x%llx\n", (unsigned long long)kbase);
-    klog_printf("[KBASE] copyin would be at 0x%llx\n", (unsigned long long)(kbase + (-0xA66D80LL)));
-    klog_printf("[KBASE] malloc would be at 0x%llx\n", (unsigned long long)(kbase + (-0xB74B0LL)));
+    find_mp4_cdev_in_data();
     return 0;
 }
 
