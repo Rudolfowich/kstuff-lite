@@ -319,8 +319,8 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         unsigned safety = 0;
         while (p && safety++ < 500) {
             uint64_t pid_u64 = 0;
-            kpeek64_checked(p + 0xb8, &pid_u64);
-            /* p_pid is stored as int (32-bit) at proc+0xb8 on FreeBSD/PS5 */
+            kpeek64_checked(p + 0x78, &pid_u64);
+            /* p_pid at proc+0x78, int32 in low 32 bits */
             uint32_t pid = (uint32_t)(pid_u64 & 0xFFFFFFFF);
             if (pid == target_pid) {
                 kpeek64_checked(p + 0x40, &target_ucred);
@@ -380,8 +380,8 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         unsigned safety = 0;
         while (p && safety++ < 500) {
             uint64_t pid_u64 = 0;
-            kpeek64_checked(p + 0xb8, &pid_u64);
-            /* p_pid is int32 in low 32 bits on PS5 */
+            /* p_pid at proc+0x78 (verified from ext_dump: ext[61]=0x0000006300000001) */
+            kpeek64_checked(p + 0x78, &pid_u64);
             if ((uint32_t)(pid_u64 & 0xFFFFFFFF) == target_pid) {
                 kpeek64_checked(p + 0x40, &t_ucred);
                 kpeek64_checked(p + 0x48, &t_fd);
@@ -405,7 +405,7 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
 
         kpoke64(td + 0x140,  t_ucred);
         kpoke64(proc + 0x40, t_ucred);
-        kpoke64(proc + 0x60, t_fd);
+        kpoke64(proc + 0x48, t_fd);   /* fixed: was 0x60 */
         args[RAX] = 0;
         return 0;
     }
