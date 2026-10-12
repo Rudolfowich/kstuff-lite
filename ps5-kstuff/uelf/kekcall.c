@@ -301,6 +301,65 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = 0;
         return 0;
     }
+    else if(nr == 14)
+    {
+        /* SWAP_UCRED_FROM_PID: подмена td_ucred на ucred процесса с target_pid.
+         * args[RDI] = target_pid (uint32_t)
+         * args[RSI] = user_buf (8 байт — бэкап старого td_ucred ptr)
+         * regs[RDI] = curthread */
+        uint32_t target_pid = (uint32_t)args[RDI];
+        uint64_t user_buf   = args[RSI];
+        uint64_t td         = regs[RDI];
+
+        extern char allproc[];
+        uint64_t p = 0;
+        kpeek64_checked((uint64_t)allproc, &p);
+
+        uint64_t target_ucred = 0;
+        unsigned safety = 0;
+        while (p && safety++ < 500) {
+            uint64_t pid_u64 = 0;
+            kpeek64_checked(p + 0xb8, &pid_u64);
+            /* p_pid is stored as int (32-bit) at proc+0xb8 on FreeBSD/PS5 */
+            uint32_t pid = (uint32_t)(pid_u64 & 0xFFFFFFFF);
+            if (pid == target_pid) {
+                kpeek64_checked(p + 0x40, &target_ucred);
+                break;
+            }
+            uint64_t next = 0;
+            kpeek64_checked(p, &next);
+            p = next;
+        }
+        if (!target_ucred) return 2;  /* pid не найден или ucred == NULL */
+
+        uint64_t old_ucred = 0;
+        kpeek64_checked(td + 0x140, &old_ucred);
+        if (user_buf) {
+            if (copy_to_kernel(user_buf, &old_ucred, sizeof(old_ucred)))
+                return EFAULT;
+        }
+
+        kpoke64(td + 0x140, target_ucred);
+        args[RAX] = 0;
+        return 0;
+    }
+    else if(nr == 15)
+    {
+        /* RESTORE_UCRED_PTR: вернуть td_ucred из user_buf (8 байт).
+         * args[RSI] = user_buf
+         * regs[RDI] = curthread */
+        uint64_t td       = regs[RDI];
+        uint64_t user_buf = args[RSI];
+        if (!user_buf) return 1;
+
+        uint64_t old_ucred = 0;
+        if (copy_from_kernel(&old_ucred, user_buf, sizeof(old_ucred)))
+            return EFAULT;
+
+        kpoke64(td + 0x140, old_ucred);
+        args[RAX] = 0;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;

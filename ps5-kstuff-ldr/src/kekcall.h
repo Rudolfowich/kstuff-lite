@@ -8,6 +8,8 @@
 #define KEKCALL_EXT_DUMP       11
 #define KEKCALL_MAX_CAPS       12
 #define KEKCALL_RESTORE_CAPS   13
+#define KEKCALL_SWAP_UCRED_PID    14
+#define KEKCALL_RESTORE_UCRED_PTR 15
 
 static inline long
 kekcall(uint32_t nr, uint64_t a1, uint64_t a2, uint64_t a3)
