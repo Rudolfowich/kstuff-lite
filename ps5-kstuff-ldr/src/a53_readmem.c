@@ -766,16 +766,12 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     /* Шаг 3: Полная энумерация ВСЕХ процессов через KEKCALL_ENUM_ALLPROC (nr 29) */
     klog_printf("[AUTH_ENUM] === ENUMERATING ALL PROCESSES VIA KERNEL allproc SYMBOL (KEKCALL 29) ===\n");
 
-    uint32_t candidate_pids[32] = {0};
-    char candidate_comms[32][32] = {{0}};
-    uint64_t candidate_authids[32] = {0};
-    int ncandidates = 0;
-
     /* Буфер для 128 процессов по 48 байт: pid(4), comm(24), ucred(8), authid(8) */
     uint8_t proc_buf[128 * 48] = {0};
     long total_procs = kekcall(KEKCALL_ENUM_ALLPROC, (uintptr_t)proc_buf, 128, 0);
     klog_printf("[AUTH_ENUM] KEKCALL_ENUM_ALLPROC returned %ld processes\n", total_procs);
 
+    /* Сканирование p_comm на структуре процесса pid=1 (init) для поиска смещения имени */
     for (long i = 0; i < total_procs && i < 128; i++) {
         uint8_t *entry = proc_buf + i * 48;
         uint32_t pid = *(uint32_t*)(entry + 0);
@@ -787,47 +783,90 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
 
         klog_printf("[PROC] #%ld pid=%u comm='%s' ucred=0x%llx authid=0x%016llx\n",
                     i, pid, comm, (unsigned long long)ucred, (unsigned long long)authid);
+    }
 
-        if (strstr(comm, "VideoCore") || strstr(comm, "MediaCore") ||
-            strstr(comm, "AvControl") || strstr(comm, "AvCapture") ||
-            strstr(comm, "audiod") || strstr(comm, "SysCore") ||
-            strstr(comm, "ShellCore") || strstr(comm, "decid") ||
-            ((authid >> 48) == 0x3800) || pid == 1) {
-            if (ncandidates < 32) {
-                candidate_pids[ncandidates] = pid;
-                strncpy(candidate_comms[ncandidates], comm, 31);
-                candidate_authids[ncandidates] = authid;
-                ncandidates++;
-            }
+    /* Сессионно-независимый отбор кандидатов по authid */
+    uint32_t cand_pids[32] = {0};
+    uint64_t cand_authids[32] = {0};
+    uint64_t cand_ucreds[32] = {0};
+    char cand_comms[32][32] = {{0}};
+    int ncand = 0;
+
+    /* ПЕРВЫЙ КАНДИДАТ ВСЕГДА: pid=1 (init baseline) */
+    for (long i = 0; i < total_procs && i < 128; i++) {
+        uint8_t *entry = proc_buf + i * 48;
+        uint32_t pid = *(uint32_t*)(entry + 0);
+        if (pid == 1 && ncand < 32) {
+            cand_pids[ncand] = 1;
+            cand_authids[ncand] = *(uint64_t*)(entry + 36);
+            cand_ucreds[ncand] = *(uint64_t*)(entry + 28);
+            memcpy(cand_comms[ncand], entry + 4, 24);
+            ncand++;
+            break;
         }
     }
 
-    /* Шаг 3.1: Тест открытия /dev/mp4/dump_for_decid под кредами кандидатов (РОДНОЙ d_open БЕЗ ПАТЧА!) */
-    klog_printf("[REAL_OPEN] === Testing native open under priority candidates (SAFETY: no intermediate klog during swap) ===\n");
+    /* Остальные кандидаты: фильтр по authid (media cluster 0x1000..0x10FF или debug bit 0x10000000 или Sony 0x3800) */
+    for (long i = 0; i < total_procs && i < 128; i++) {
+        uint8_t *entry = proc_buf + i * 48;
+        uint32_t pid = *(uint32_t*)(entry + 0);
+        if (pid == 0 || pid == 1) continue;
 
-    /* Приоритетные PID из списка */
-    const uint32_t prio_pids[] = { 73, 77, 75, 74, 96, 94, 1 };
-    const int num_prio = sizeof(prio_pids) / sizeof(prio_pids[0]);
+        uint64_t auth = *(uint64_t*)(entry + 36);
+        if (auth == 0) continue;
 
-    for (int p_idx = 0; p_idx < num_prio; p_idx++) {
-        uint32_t tpid = prio_pids[p_idx];
-        uint64_t tauth = 0;
-        uint64_t tucred = 0;
-        char tcomm[32] = "prio_candidate";
+        uint16_t low = auth & 0xFFFF;
+        int is_media = (low >= 0x1000 && low <= 0x10FF);
+        int is_debug = ((auth & 0x10000000ULL) != 0);
+        int is_sce   = ((auth >> 48) == 0x3800);
 
-        /* Находим ucred и authid для этого PID из полученного буфера процессов */
-        for (long i = 0; i < total_procs && i < 128; i++) {
-            uint8_t *entry = proc_buf + i * 48;
-            uint32_t e_pid = *(uint32_t*)(entry + 0);
-            if (e_pid == tpid) {
-                memcpy(tcomm, entry + 4, 24);
-                tucred = *(uint64_t*)(entry + 28);
-                tauth = *(uint64_t*)(entry + 36);
-                break;
-            }
+        if ((is_media || is_debug || is_sce) && ncand < 32) {
+            cand_pids[ncand] = pid;
+            cand_authids[ncand] = auth;
+            cand_ucreds[ncand] = *(uint64_t*)(entry + 28);
+            memcpy(cand_comms[ncand], entry + 4, 24);
+            ncand++;
         }
+    }
 
-        /* Защита: boost ucred refcount на +100 на всякий случай */
+    klog_printf("[REAL_OPEN] filtered %d candidates from %ld procs\n", ncand, total_procs);
+    for (int c = 0; c < ncand; c++) {
+        klog_printf("[CAND #%d] pid=%u authid=0x%016llx ucred=0x%llx\n",
+                    c, cand_pids[c], (unsigned long long)cand_authids[c], (unsigned long long)cand_ucreds[c]);
+    }
+
+    if (ncand == 0) {
+        klog_printf("[FATAL] no candidates matched filter!\n");
+        return -1;
+    }
+
+    /* Шаг 3.1: Восстановление истинного orig_dopen (null_dopen + 0x468) на mp4 cdevsw */
+    uint64_t orig_dopen_calc = null_dopen + 0x468ULL;
+    klog_printf("[DBG] null_dopen=0x%llx orig_dopen_calc=0x%llx\n",
+                (unsigned long long)null_dopen, (unsigned long long)orig_dopen_calc);
+
+    for (int m = 0; m < mp4_count; m++) {
+        uint64_t csw = mp4_parent_csws[m];
+        if (!csw) continue;
+        if (strstr(mp4_names[m], "dump_for_decid")) {
+            long wr = kekcall(27 /* WRITE64 */, csw + 0x10ULL, orig_dopen_calc, 0);
+            uint64_t rb = 0;
+            kekcall(KEKCALL_DUMP_MEM, csw + 0x10ULL, (uintptr_t)&rb, 8);
+            klog_printf("[VERIFY] csw+0x10 after unpatch: 0x%llx (expected 0x%llx) %s (ret=%ld)\n",
+                        (unsigned long long)rb, (unsigned long long)orig_dopen_calc,
+                        (rb == orig_dopen_calc) ? "OK" : "MISMATCH", wr);
+        }
+    }
+
+    /* Шаг 3.2: Прогон всех отобранных кандидатов на нативном d_open */
+    klog_printf("[REAL_OPEN] === Testing native open under %d candidates ===\n", ncand);
+
+    for (int c = 0; c < ncand; c++) {
+        uint32_t tpid = cand_pids[c];
+        uint64_t tauth = cand_authids[c];
+        uint64_t tucred = cand_ucreds[c];
+
+        /* Защита: boost ucred refcount на +100 */
         if (tucred && (tucred & 0xFFFF000000000000ULL) == 0xFFFF000000000000ULL) {
             uint32_t ref = 0;
             kekcall(KEKCALL_DUMP_MEM, tucred, (uintptr_t)&ref, 4);
@@ -856,7 +895,6 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                 err_test = errno;
             }
             if (fd_test >= 0) {
-                /* Сессия инициализирована родным d_open! Пробуем сразу write и read */
                 uint8_t init_cmd[4] = {0x01, 0x00, 0x00, 0x00};
                 nw = write(fd_test, init_cmd, 4);
                 werr = errno;
@@ -867,8 +905,8 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         }
 
         /* ЛОГИРУЕМ ТОЛЬКО ПОСЛЕ ПОЛНОГО ВОССТАНОВЛЕНИЯ КРЕДОВ */
-        klog_printf("[REAL_OPEN pid=%u] '%s' (authid=0x%016llx) -> swap=%ld fd=%d errno=%d write nw=%zd errno=%d\n",
-                    tpid, tcomm, (unsigned long long)tauth, sr, fd_test, err_test, nw, werr);
+        klog_printf("[REAL_OPEN #%d pid=%u] (authid=0x%016llx) -> swap=%ld fd=%d errno=%d write nw=%zd errno=%d\n",
+                    c, tpid, (unsigned long long)tauth, sr, fd_test, err_test, nw, werr);
 
         if (fd_test >= 0 && nw > 0) {
             klog_printf("[REAL_OPEN] *** BINGO! VICTORY! Native d_open + write SUCCESS under pid %u! ***\n", tpid);
@@ -882,44 +920,6 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         }
         if (fd_test >= 0) {
             close(fd_test);
-        }
-    }
-
-    /* Дополнительный проход по всем найденным кандидатам с именем процесса (если comm заработал) */
-    for (int t = 0; t < ncandidates; t++) {
-        uint32_t tpid = candidate_pids[t];
-        int already_tested = 0;
-        for (int p_idx = 0; p_idx < num_prio; p_idx++) {
-            if (prio_pids[p_idx] == tpid) { already_tested = 1; break; }
-        }
-        if (already_tested) continue;
-
-        const char *tcomm = candidate_comms[t];
-        uint64_t tauth = candidate_authids[t];
-
-        uint64_t backup[4] = {0};
-        int fd_test = -1;
-        int err_test = 0;
-        ssize_t nw = -1;
-        int werr = 0;
-
-        long sr = kekcall(KEKCALL_SWAP_FULL, tpid, (uintptr_t)backup, 0);
-        if (sr == 0) {
-            fd_test = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
-            err_test = errno;
-            if (fd_test >= 0) {
-                uint8_t init_cmd[4] = {0x01, 0x00, 0x00, 0x00};
-                nw = write(fd_test, init_cmd, 4);
-                werr = errno;
-            }
-            kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)backup, 0);
-        }
-
-        klog_printf("[REAL_OPEN candidate pid=%u] '%s' (authid=0x%016llx) -> fd=%d errno=%d nw=%zd errno=%d\n",
-                    tpid, tcomm, (unsigned long long)tauth, fd_test, err_test, nw, werr);
-        if (fd_test >= 0) {
-            close(fd_test);
-            if (nw > 0) return 0;
         }
     }
 
