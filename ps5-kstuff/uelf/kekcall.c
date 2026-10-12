@@ -840,15 +840,15 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         uint32_t count = 0;
         unsigned safety = 0;
         while (p && count < max_entries && safety++ < 600) {
-            uint64_t pid_u64_bc = 0, pid_u64_2c0 = 0;
+            uint64_t pid_u64_bc = 0, pid_u64_b0 = 0;
             kpeek64_checked(p + 0xBC, &pid_u64_bc);
-            kpeek64_checked(p + 0x2C0, &pid_u64_2c0);
+            kpeek64_checked(p + 0xB0, &pid_u64_b0);
             uint32_t pid = (uint32_t)(pid_u64_bc & 0xFFFFFFFF);
-            if (!pid) pid = (uint32_t)(pid_u64_2c0 & 0xFFFFFFFF);
+            if (!pid) pid = (uint32_t)(pid_u64_b0 & 0xFFFFFFFF);
 
             char comm[24] = {0};
-            copy_from_kernel_raw(comm, p + 0x448, 20);
-            if (!comm[0]) copy_from_kernel_raw(comm, p + 0x44C, 20);
+            copy_from_kernel(comm, p + 0x44C, 20);
+            if (!comm[0]) copy_from_kernel(comm, p + 0x448, 20);
 
             uint64_t ucred = 0;
             kpeek64_checked(p + 0x40, &ucred);
@@ -859,10 +859,10 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
 
             /* Pack struct: pid(4), comm(24), ucred(8), authid(8) = 44 bytes -> 48 bytes with pad */
             uint8_t entry[48] = {0};
-            *(uint32_t*)(entry + 0) = pid;
-            __builtin_memcpy(entry + 4, comm, 24);
-            *(uint64_t*)(entry + 28) = ucred;
-            *(uint64_t*)(entry + 36) = authid;
+            memcpy(entry + 0, &pid, 4);
+            memcpy(entry + 4, comm, 24);
+            memcpy(entry + 28, &ucred, 8);
+            memcpy(entry + 36, &authid, 8);
 
             if (copy_to_kernel(user_buf + (uint64_t)count * 48, entry, 48) != 0)
                 break;
