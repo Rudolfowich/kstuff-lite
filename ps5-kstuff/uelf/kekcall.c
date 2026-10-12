@@ -258,6 +258,49 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = (uint64_t)idx;
         return 0;
     }
+    else if(nr == 12)
+    {
+        /* MAX_CAPS: забить sce_caps единицами, бэкап в user_buf (80 байт) */
+        uint64_t td = regs[RDI];
+        uint64_t ucred = 0;
+        kpeek64_checked(td + 0x140, &ucred);
+
+        uint64_t user_buf = args[RSI];
+        if (!user_buf) return 1;
+
+        uint64_t backup[10];
+        for (int i = 0; i < 10; i++) {
+            kpeek64_checked(ucred + 0x58 + i*8, &backup[i]);
+        }
+        if (copy_to_kernel(user_buf, backup, sizeof(backup)))
+            return EFAULT;
+
+        for (int i = 0; i < 10; i++) {
+            kpoke64(ucred + 0x58 + i*8, 0xFFFFFFFFFFFFFFFFULL);
+        }
+        args[RAX] = 0;
+        return 0;
+    }
+    else if(nr == 13)
+    {
+        /* RESTORE_CAPS: вернуть sce_caps из user_buf */
+        uint64_t td = regs[RDI];
+        uint64_t ucred = 0;
+        kpeek64_checked(td + 0x140, &ucred);
+
+        uint64_t user_buf = args[RSI];
+        if (!user_buf) return 1;
+
+        uint64_t backup[10];
+        if (copy_from_kernel(backup, user_buf, sizeof(backup)))
+            return EFAULT;
+
+        for (int i = 0; i < 10; i++) {
+            kpoke64(ucred + 0x58 + i*8, backup[i]);
+        }
+        args[RAX] = 0;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;
