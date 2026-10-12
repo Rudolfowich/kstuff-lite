@@ -259,10 +259,10 @@ test_mp4_open_with_root(void)
 int
 walk_find_mp4_cdevsw(void)
 {
-    /* allproc получаем через KEKCALL_GET_KBASE или ext[39] */
+    /* allproc получаем через KEKCALL_GET_KBASE */
     uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
-    /* allproc на 13.60 находится по kbase + 0x2289E80 (т.к. 0xceab9e80 - 0xcc830000 = 0x2289e80) */
-    uint64_t allproc_addr = kbase + 0x2289E80ULL;
+    /* allproc на 13.60 находится по kbase + 0x28C9E80 (0xceab9e80 - 0xcc1f0000 = 0x28C9E80) */
+    uint64_t allproc_addr = kbase + 0x28C9E80ULL;
 
     klog_printf("[WALK] kbase=0x%llx, allproc=0x%llx\n",
                 (unsigned long long)kbase,
