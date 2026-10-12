@@ -585,17 +585,26 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
     }
     else if(nr == 22)
     {
-        /* SCAN_XREF_V2: xref scan with explicit start_abs (always 1MB to avoid watchdog)
+        /* SCAN_XREF_V2: xref scan with explicit start_abs and safe chunk_bytes
          * args[RDI] = target
          * args[RSI] = user_buf
-         * args[RDX] = start_abs */
+         * args[RDX] = start_abs
+         * args[R8]  = chunk_bytes (default 64KB, max 256KB) */
         uint64_t target = args[RDI];
         uint64_t user_buf = args[RSI];
         uint64_t start_abs = args[RDX];
+        uint64_t chunk_bytes = args[R8] ? args[R8] : (64ULL * 1024ULL);
         if (!target || !user_buf || !start_abs) return 1;
+        if (chunk_bytes > 256ULL * 1024ULL) chunk_bytes = 64ULL * 1024ULL;
 
-        uint64_t scan_bytes = 1024ULL * 1024ULL;
+        /* Предварительная проверка доступности страницы */
+        uint64_t test_val = 0;
+        if (kpeek64_checked(start_abs, &test_val) != 0) {
+            args[RAX] = 0;
+            return 0;
+        }
 
+        uint64_t scan_bytes = chunk_bytes;
         uint64_t finds[32] = {0};
         unsigned nfound = 0, total = 0;
         uint8_t buf[128];

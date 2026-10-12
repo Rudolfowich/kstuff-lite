@@ -151,24 +151,28 @@ smart_xref_scan(void)
                 (unsigned long long)text_end,
                 (unsigned long long)str_mp4);
 
-    for (int chunk = 0; chunk < 12; chunk++) {
-        uint64_t cs = text_start + chunk * 1024ULL * 1024ULL;
-        if (cs >= text_end) break;
+    /* Сканируем .text шагами по 64 KB, чтобы ни при каких условиях не триггерить watchdog ядра */
+    uint64_t chunk_step = 64ULL * 1024ULL;
+    uint32_t total_chunks = (uint32_t)((text_end - text_start) / chunk_step);
+
+    klog_printf("[XR] scanning %u chunks (64 KB each) with safe-probe\n", total_chunks);
+
+    for (uint32_t chunk = 0; chunk < total_chunks; chunk++) {
+        uint64_t cs = text_start + (uint64_t)chunk * chunk_step;
 
         /* SAFE PROBE: проверяем доступность адреса cs перед сканированием */
         uint64_t probe = 0;
         if (kekcall(KEKCALL_SAFE_PEEK, cs, (uintptr_t)&probe, 0) != 0) {
-            klog_printf("[XR] chunk %d @ 0x%llx: UNMAPPED, skip\n",
-                        chunk, (unsigned long long)cs);
             continue;
         }
 
         uint64_t finds[16] = {0};
-        long n = kekcall(KEKCALL_SCAN_XREF_V2, str_mp4, (uintptr_t)finds, cs);
-        klog_printf("[XR] chunk %d @ 0x%llx: %ld xrefs\n",
-                    chunk, (unsigned long long)cs, n);
+        /* kekcall5(22, target, user_buf, start_abs, chunk_bytes=64KB) */
+        long n = kekcall5(KEKCALL_SCAN_XREF_V2, str_mp4, (uintptr_t)finds, cs, chunk_step);
 
         if (n > 0) {
+            klog_printf("[XR] chunk %u @ 0x%llx: %ld xrefs\n",
+                        chunk, (unsigned long long)cs, n);
             for (int i = 0; i < 16; i++) {
                 if (finds[i]) {
                     uint64_t rip = finds[i];
@@ -192,7 +196,11 @@ smart_xref_scan(void)
                 }
             }
         }
-        sleep(1);  /* heartbeat */
+
+        /* Каждые 16 чанков (1 МБ) даем короткую паузу планировщику */
+        if ((chunk & 0x0F) == 0) {
+            usleep(5000);  /* 5 мс */
+        }
     }
     return 0;
 }
