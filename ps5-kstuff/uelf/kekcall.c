@@ -481,22 +481,26 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
     }
     else if(nr == 19)
     {
-        /* DUMP_KERNEL_MEMORY: dump 64 u64 (512 байт) вокруг target адреса.
-         * args[RDI] = target address
-         * args[RSI] = user_buf (uint64_t[64]) */
+        /* DUMP_KERNEL_MEMORY: dump u64s from target address.
+         * args[RDI] = target address (uint64_t)
+         * args[RSI] = user_buf (uint64_t*)
+         * args[RDX] = nbytes (default 512, max 512) */
         uint64_t target = args[RDI];
         uint64_t user_buf = args[RSI];
+        uint64_t nbytes = args[RDX];
         if (!target || !user_buf) return 1;
+        if (nbytes == 0 || nbytes > 512) nbytes = 512;
+        unsigned count = (nbytes + 7) / 8;
 
         uint64_t base = target & ~7ULL;
         uint64_t data[64] = {0};
-        for (int i = 0; i < 64; i++) {
+        for (unsigned i = 0; i < count && i < 64; i++) {
             kpeek64_checked(base + i*8, &data[i]);
         }
 
-        if (copy_to_kernel(user_buf, data, sizeof(data)) != 0)
+        if (copy_to_kernel(user_buf, data, count * 8) != 0)
             return EFAULT;
-        args[RAX] = 64;
+        args[RAX] = count * 8;
         return 0;
     }
     else if(nr == 20)
