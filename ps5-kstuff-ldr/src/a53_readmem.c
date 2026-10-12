@@ -61,17 +61,36 @@ a53_find_profile(uint32_t fw, uint32_t cond)
 
 
 int
-confirm_903700e9(void)
+step_final(void)
 {
-    /* Dump 1: ПРЯМО 0x903700e9 — что там, строка или код? */
+    /* [A] Подтвердить .text — dump stub по 0x92995199 */
     {
-        uint64_t addr = 0xffffffff903700e9ULL;
-        uint8_t buf[64];
-        for (int i = 0; i < 64; i++) buf[i] = 0;
-        long r = kekcall(KEKCALL_DUMP_MEM, addr, (uintptr_t)buf, 64);
-        klog_printf("[A] 0x%llx ret=%ld\n", (unsigned long long)addr, r);
-        for (int i = 0; i < 64; i += 16) {
-            klog_printf("[A] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x | %c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c\n",
+        uint64_t addr = 0xffffffff92995199ULL;
+        uint8_t buf[128];
+        for (int i = 0; i < 128; i++) buf[i] = 0;
+        long r = kekcall(KEKCALL_DUMP_MEM, addr, (uintptr_t)buf, 128);
+        klog_printf("[TEXT] 0x%llx ret=%ld\n", (unsigned long long)addr, r);
+        for (int i = 0; i < 128; i += 16) {
+            klog_printf("[TEXT] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                i,
+                buf[i], buf[i+1], buf[i+2], buf[i+3], buf[i+4], buf[i+5], buf[i+6], buf[i+7],
+                buf[i+8], buf[i+9], buf[i+10], buf[i+11], buf[i+12], buf[i+13], buf[i+14], buf[i+15]);
+        }
+    }
+
+    /* [B] Поиск "mp4" строки в .rodata — найти РЯДОМ со строкой "mp4/dump" 
+     *     есть ли короткая "mp4\0" которую может использовать cdev */
+    {
+        /* Сначала scan .rodata около str_addr "mp4/dump" для адресов других mp4 строк */
+        uint64_t str_mp4_dump = 0xffffffff903138aaULL;
+        /* Dump 512 bytes BEFORE str_addr — обычно соседние строки драйвера рядом */
+        uint64_t base = (str_mp4_dump - 512) & ~7ULL;
+        uint8_t buf[512];
+        for (int i = 0; i < 512; i++) buf[i] = 0;
+        long r = kekcall(KEKCALL_DUMP_MEM, base, (uintptr_t)buf, 512);
+        klog_printf("[RODATA] 0x%llx ret=%ld\n", (unsigned long long)base, r);
+        for (int i = 0; i < 512; i += 16) {
+            klog_printf("[RODATA] +0x%03x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x | %c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c\n",
                 i,
                 buf[i], buf[i+1], buf[i+2], buf[i+3], buf[i+4], buf[i+5], buf[i+6], buf[i+7],
                 buf[i+8], buf[i+9], buf[i+10], buf[i+11], buf[i+12], buf[i+13], buf[i+14], buf[i+15],
@@ -93,28 +112,13 @@ confirm_903700e9(void)
                 (buf[i+15]>=32&&buf[i+15]<127)?buf[i+15]:'.');
         }
     }
-
-    /* Dump 2: расширенная структура 0x91c76520 (256 bytes) — увидим ПОЛНУЮ struct */
-    {
-        uint64_t addr = 0xffffffff91c76520ULL;
-        uint8_t buf[256];
-        for (int i = 0; i < 256; i++) buf[i] = 0;
-        long r = kekcall(KEKCALL_DUMP_MEM, addr, (uintptr_t)buf, 256);
-        klog_printf("[B] 0x%llx ret=%ld\n", (unsigned long long)addr, r);
-        for (int i = 0; i < 256; i += 16) {
-            klog_printf("[B] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                i,
-                buf[i], buf[i+1], buf[i+2], buf[i+3], buf[i+4], buf[i+5], buf[i+6], buf[i+7],
-                buf[i+8], buf[i+9], buf[i+10], buf[i+11], buf[i+12], buf[i+13], buf[i+14], buf[i+15]);
-        }
-    }
     return 0;
 }
 
 int
 probe_mp4_device(void)
 {
-    confirm_903700e9();
+    step_final();
     return 0;
 }
 
