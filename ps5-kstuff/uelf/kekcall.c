@@ -384,7 +384,7 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
             /* p_pid is int32 in low 32 bits on PS5 */
             if ((uint32_t)(pid_u64 & 0xFFFFFFFF) == target_pid) {
                 kpeek64_checked(p + 0x40, &t_ucred);
-                kpeek64_checked(p + 0x60, &t_fd);
+                kpeek64_checked(p + 0x48, &t_fd);
                 break;
             }
             uint64_t next = 0;
@@ -396,7 +396,7 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         uint64_t backup[4] = {0};
         kpeek64_checked(td + 0x140,  &backup[0]);   /* old td_ucred */
         kpeek64_checked(proc + 0x40, &backup[1]);   /* old p_ucred */
-        kpeek64_checked(proc + 0x60, &backup[2]);   /* old p_fd */
+        kpeek64_checked(proc + 0x48, &backup[2]);   /* old p_fd */
         backup[3] = 0;
         if (user_buf) {
             if (copy_to_kernel(user_buf, backup, sizeof(backup)))
@@ -426,7 +426,7 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
 
         kpoke64(td + 0x140,  backup[0]);
         kpoke64(proc + 0x40, backup[1]);
-        kpoke64(proc + 0x60, backup[2]);
+        kpoke64(proc + 0x48, backup[2]);   /* p_fd */
         args[RAX] = 0;
         return 0;
     }
