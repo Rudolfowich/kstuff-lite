@@ -65,31 +65,33 @@ static uint64_t g_finds[32];
 int
 probe_mp4_device(void)
 {
+    /* Получаем живые адреса через ext dump — потом считаем arena bases */
+    static uint64_t ext_buf[192];
+    for (int i = 0; i < 192; i++) ext_buf[i] = 0;
+    kekcall(KEKCALL_EXT_DUMP, 0, (uintptr_t)ext_buf, sizeof(ext_buf));
+
+    uint64_t ucred_va = ext_buf[3];   /* ucred VA — обычно в "низком" heap arena */
+    uint64_t proc_va  = ext_buf[2];   /* proc VA — часто в "высоком" heap arena */
+
+    /* Выравниваем на 4GB вниз — надёжный arena base */
+    uint64_t arena1 = ucred_va & ~0xFFFFFFFFULL;
+    uint64_t arena2 = proc_va  & ~0xFFFFFFFFULL;
+
+    klog_printf("[a53] arena1 base = 0x%llx (from ucred VA 0x%llx)\n",
+                (unsigned long long)arena1, (unsigned long long)ucred_va);
+    klog_printf("[a53] arena2 base = 0x%llx (from proc VA 0x%llx)\n",
+                (unsigned long long)arena2, (unsigned long long)proc_va);
+
+    /* Scan arena 1 */
     for (int i = 0; i < 32; i++) g_finds[i] = 0;
-
-    klog_puts("[a53] scanning heap 0xffffaeda00000000..+64MB for \"mp4/dump\" ...\n");
-    long nfound = kekcall(KEKCALL_SCAN_DMEM,
-                          64 /* MB */,
-                          (uintptr_t)g_finds,
-                          0xffffaeda00000000ULL /* heap start из текущего dump */);
-    klog_printf("[a53] heap scan: total=%ld\n", nfound);
+    long n1 = kekcall(KEKCALL_SCAN_DMEM, 128 /* MB */, (uintptr_t)g_finds, arena1);
+    klog_printf("[a53] arena1 scan: total=%ld\n", n1);
     for (int i = 0; i < 32; i++) {
-        klog_printf("[a53]   heap_finds[%2d] = 0x%016llx\n", i, (unsigned long long)g_finds[i]);
+        klog_printf("[a53]   a1[%2d] = 0x%016llx\n", i, (unsigned long long)g_finds[i]);
     }
 
-    /* Если не нашлось — попробуем второй heap range */
-    if (nfound == 0) {
-        for (int i = 0; i < 32; i++) g_finds[i] = 0;
-        klog_puts("[a53] trying 0xffffaee200000000..+64MB ...\n");
-        nfound = kekcall(KEKCALL_SCAN_DMEM, 64, (uintptr_t)g_finds, 0xffffaee200000000ULL);
-        klog_printf("[a53] heap scan 2: total=%ld\n", nfound);
-        for (int i = 0; i < 32; i++) {
-            klog_printf("[a53]   heap_finds2[%2d] = 0x%016llx\n", i, (unsigned long long)g_finds[i]);
-        }
-    }
-
-    if (nfound > 0) {
-        int count = (nfound > 4) ? 4 : (int)nfound;
+    if (n1 > 0) {
+        int count = (n1 > 4) ? 4 : (int)n1;
         for (int a = 0; a < count; a++) {
             if (!g_finds[a]) continue;
             for (int i = 0; i < 64; i++) g_dump[i] = 0;
@@ -108,7 +110,38 @@ probe_mp4_device(void)
         }
     }
 
-    return (nfound > 0) ? 0 : -1;
+    /* Scan arena 2 — только если arena2 != arena1 */
+    if (arena2 != arena1) {
+        static uint64_t a2_finds[32];
+        for (int i = 0; i < 32; i++) a2_finds[i] = 0;
+        long n2 = kekcall(KEKCALL_SCAN_DMEM, 128 /* MB */, (uintptr_t)a2_finds, arena2);
+        klog_printf("[a53] arena2 scan: total=%ld\n", n2);
+        for (int i = 0; i < 32; i++) {
+            klog_printf("[a53]   a2[%2d] = 0x%016llx\n", i, (unsigned long long)a2_finds[i]);
+        }
+        if (n2 > 0) {
+            int count = (n2 > 4) ? 4 : (int)n2;
+            for (int a = 0; a < count; a++) {
+                if (!a2_finds[a]) continue;
+                for (int i = 0; i < 64; i++) g_dump[i] = 0;
+                klog_printf("[a53] === dump around heap addr 0x%llx ===\n", (unsigned long long)a2_finds[a]);
+                kekcall(KEKCALL_DUMP_MEM, a2_finds[a], (uintptr_t)g_dump, 0);
+                for (int i = 0; i < 64; i++) {
+                    char asc[9] = {0};
+                    memcpy(asc, &g_dump[i], 8);
+                    for (int c = 0; c < 8; c++) {
+                        if (asc[c] < 32 || asc[c] > 126) asc[c] = '.';
+                    }
+                    klog_printf("[a53]   [%2d] 0x%016llx '%s' (0x%llx)\n",
+                                i, (unsigned long long)g_dump[i], asc,
+                                (unsigned long long)((a2_finds[a] & ~7ULL) - 256 + i*8));
+                }
+            }
+        }
+        n1 = n1 + n2;
+    }
+
+    return (n1 > 0) ? 0 : -1;
 }
 
 /* ---- Main install entry --------------------------------------------- */
