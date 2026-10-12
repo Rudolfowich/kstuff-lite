@@ -73,6 +73,44 @@ probe_mp4_device(void)
     uint64_t proc_va  = ext_buf[2];
     uint64_t fd_va    = ext_buf[47];
 
+    /* 1. Scan inline bytes "mp4/dump" */
+    static uint64_t g_inline[32];
+    for (int i = 0; i < 32; i++) g_inline[i] = 0;
+    uint64_t str_addr = 0;
+    long n1 = kekcall(KEKCALL_SCAN_DMEM, 128, (uintptr_t)g_inline,
+                      proc_va - (64ULL * 1024 * 1024));
+    klog_printf("[a53] inline scan: total=%ld\n", n1);
+    for (int i = 0; i < 32; i++) {
+        if (g_inline[i]) {
+            klog_printf("[a53]   inline[%2d] = 0x%016llx\n", i, (unsigned long long)g_inline[i]);
+            /* Выбираем именно второй адрес (mp4/dump), если есть оба, иначе первый */
+            if (i == 1 || !str_addr) str_addr = g_inline[i];
+        }
+    }
+    if (!str_addr) {
+        klog_puts("[a53] NO inline find — abort\n");
+        return -1;
+    }
+
+    /* 2. Dump 512 байт вокруг найденной строки */
+    for (int i = 0; i < 64; i++) g_dump[i] = 0;
+    klog_printf("[a53] === dump around str_addr 0x%llx ===\n", (unsigned long long)str_addr);
+    kekcall(KEKCALL_DUMP_MEM, str_addr, (uintptr_t)g_dump, 0);
+    uint64_t base = (str_addr - 256) & ~7ULL;
+    for (int i = 0; i < 64; i++) {
+        char asc[9] = {0};
+        memcpy(asc, &g_dump[i], 8);
+        for (int c = 0; c < 8; c++) {
+            if ((unsigned char)asc[c] < 32 || (unsigned char)asc[c] > 126) asc[c] = '.';
+        }
+        klog_printf("[a53]   [%+4d] 0x%016llx '%s' @ 0x%llx\n",
+                    (i - 32) * 8, (unsigned long long)g_dump[i], asc,
+                    (unsigned long long)(base + i*8));
+    }
+
+    /* 3. Scan heap для указателя на str_addr (как 8-байт значение) */
+    klog_printf("[a53] === scan for pointer 0x%llx (8-byte needle) in heap ===\n",
+                (unsigned long long)str_addr);
     uint64_t scan_starts[] = {
         ucred_va ? (ucred_va - (64ULL * 1024 * 1024)) : 0,
         proc_va  ? (proc_va  - (64ULL * 1024 * 1024)) : 0,
@@ -80,65 +118,39 @@ probe_mp4_device(void)
     };
     const char *labels[] = {"ucred", "proc", "fd"};
 
-    /* ВАРИАНТ 1: inline "mp4/dump" bytes (0x706d75642f34706d) */
-    klog_puts("[a53] === Variant 1: inline bytes ===\n");
     for (int s = 0; s < 3; s++) {
         if (!scan_starts[s]) continue;
         for (int i = 0; i < 32; i++) g_finds[i] = 0;
-        long n = kekcall(KEKCALL_SCAN_DMEM, 128, (uintptr_t)g_finds, scan_starts[s]);
-        klog_printf("[a53] inline @%s (0x%llx): total=%ld\n",
-                    labels[s], (unsigned long long)scan_starts[s], n);
-        for (int i = 0; i < 32; i++) {
-            if (g_finds[i]) klog_printf("[a53]   inline[%2d] = 0x%016llx\n", i, (unsigned long long)g_finds[i]);
-        }
-        if (n > 0) {
-            klog_puts("[a53] FOUND inline!\n");
-            for (int a = 0; a < 4 && a < n; a++) {
-                kekcall(KEKCALL_DUMP_MEM, g_finds[a], (uintptr_t)g_dump, 0);
-                for (int i = 0; i < 64; i++) {
-                    char asc[9] = {0};
-                    memcpy(asc, &g_dump[i], 8);
-                    for (int c = 0; c < 8; c++) if (asc[c] < 32 || asc[c] > 126) asc[c] = '.';
-                    klog_printf("[a53]   [%2d] 0x%016llx '%s' (0x%llx)\n",
-                                i, (unsigned long long)g_dump[i], asc,
-                                (unsigned long long)((g_finds[a] & ~7ULL) - 256 + i*8));
-                }
-            }
-            return 0;
-        }
-    }
-
-    /* ВАРИАНТ 2: pointer to .rodata string (0xffffffffdadd38aa) */
-    const uint64_t rodata_str_needle = 0xffffffffdadd38aaULL;
-    klog_printf("[a53] === Variant 2: pointer to .rodata (0x%llx) ===\n",
-                (unsigned long long)rodata_str_needle);
-    for (int s = 0; s < 3; s++) {
-        if (!scan_starts[s]) continue;
-        for (int i = 0; i < 32; i++) g_finds[i] = 0;
-        long n = kekcall5(KEKCALL_SCAN_DMEM, 128, (uintptr_t)g_finds, scan_starts[s], rodata_str_needle);
+        long nptr = kekcall5(KEKCALL_SCAN_DMEM, 128, (uintptr_t)g_finds, scan_starts[s], str_addr);
         klog_printf("[a53] ptr @%s (0x%llx): total=%ld\n",
-                    labels[s], (unsigned long long)scan_starts[s], n);
+                    labels[s], (unsigned long long)scan_starts[s], nptr);
         for (int i = 0; i < 32; i++) {
-            if (g_finds[i]) klog_printf("[a53]   ptr[%2d] = 0x%016llx\n", i, (unsigned long long)g_finds[i]);
+            if (g_finds[i]) {
+                klog_printf("[a53]   ptr[%2d] = 0x%016llx (cdev_candidate = 0x%llx)\n",
+                            i, (unsigned long long)g_finds[i],
+                            (unsigned long long)(g_finds[i] - 0x98));
+            }
         }
-        if (n > 0) {
-            klog_puts("[a53] FOUND pointer in heap!\n");
-            for (int a = 0; a < 4 && a < n; a++) {
+        if (nptr > 0) {
+            klog_puts("[a53] FOUND pointer in heap! Dumping surroundings of cdev...\n");
+            for (int a = 0; a < 4 && a < nptr; a++) {
+                uint64_t cdev_ptr = g_finds[a] - 0x98;
+                for (int i = 0; i < 64; i++) g_dump[i] = 0;
                 kekcall(KEKCALL_DUMP_MEM, g_finds[a], (uintptr_t)g_dump, 0);
                 for (int i = 0; i < 64; i++) {
                     char asc[9] = {0};
                     memcpy(asc, &g_dump[i], 8);
-                    for (int c = 0; c < 8; c++) if (asc[c] < 32 || asc[c] > 126) asc[c] = '.';
-                    klog_printf("[a53]   [%2d] 0x%016llx '%s' (0x%llx)\n",
-                                i, (unsigned long long)g_dump[i], asc,
-                                (unsigned long long)((g_finds[a] & ~7ULL) - 256 + i*8));
+                    for (int c = 0; c < 8; c++) if ((unsigned char)asc[c] < 32 || (unsigned char)asc[c] > 126) asc[c] = '.';
+                    klog_printf("[a53]   [%+4d] 0x%016llx '%s' @ 0x%llx\n",
+                                (i - 32) * 8, (unsigned long long)g_dump[i], asc,
+                                (unsigned long long)(((g_finds[a] - 256) & ~7ULL) + i*8));
                 }
             }
             return 0;
         }
     }
 
-    return -1;
+    return 0;
 }
 
 /* ---- Main install entry --------------------------------------------- */
