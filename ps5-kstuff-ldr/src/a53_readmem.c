@@ -583,10 +583,10 @@ find_and_patch_mp4_cdevsw(void)
     sigaction(SIGSYS, &sa, NULL);
 
     int total_cdev_nodes = 0;
-    uint64_t mp4_parent_csw = 0;
-    uint64_t mp4_cdev_node = 0;
-    (void)mp4_cdev_node;
-    char mp4_node_name[64] = {0};
+    uint64_t null_parent_csw = 0;
+    uint64_t mp4_parent_csws[8] = {0};
+    char     mp4_names[8][64] = {{0}};
+    int      mp4_count = 0;
 
     for (int idx = 0; idx < g_cdevsw_count; idx++) {
         uint64_t csw = g_cdevsw_list[idx];
@@ -651,15 +651,27 @@ find_and_patch_mp4_cdevsw(void)
                             total_cdev_nodes, (unsigned long long)csw, csw_name,
                             (unsigned long long)cur_cdev, dev_name);
 
-                if (strstr(dev_name, "mp4") || strstr(dev_name, "dump")) {
+                if (strcmp(dev_name, "null") == 0) {
+                    null_parent_csw = csw;
+                    klog_printf("[WALK] *** FOUND /dev/null parent_csw=0x%llx ***\n",
+                                (unsigned long long)csw);
+                }
+
+                if (strncmp(dev_name, "mp4/", 4) == 0 || strstr(dev_name, "mp4")) {
                     klog_printf("[WALK] ****************************************************\n");
                     klog_printf("[WALK] *** TARGET MATCH: '%s' @ cdev=0x%llx parent_csw=0x%llx (%s) ***\n",
                                 dev_name, (unsigned long long)cur_cdev,
                                 (unsigned long long)csw, csw_name);
                     klog_printf("[WALK] ****************************************************\n");
-                    mp4_parent_csw = csw;
-                    mp4_cdev_node = cur_cdev;
-                    strncpy(mp4_node_name, dev_name, sizeof(mp4_node_name) - 1);
+                    int found_dup = 0;
+                    for (int m = 0; m < mp4_count; m++) {
+                        if (mp4_parent_csws[m] == csw) found_dup = 1;
+                    }
+                    if (!found_dup && mp4_count < 8) {
+                        mp4_parent_csws[mp4_count] = csw;
+                        strncpy(mp4_names[mp4_count], dev_name, 63);
+                        mp4_count++;
+                    }
                 }
             }
 
@@ -679,91 +691,74 @@ find_and_patch_mp4_cdevsw(void)
     signal(SIGSYS, SIG_DFL);
     klog_printf("[WALK] Full map complete. Total cdev nodes found: %d\n", total_cdev_nodes);
 
-    /* Тестовая проверка kekcall(26) probe на известном icc_configuration */
-    uint64_t icc_filter = 0;
-    memcpy(&icc_filter, "icc_conf", 8);
-    long probe_ret = kekcall(26, icc_filter, 0, 0);
-    klog_printf("[TEST26] kekcall(26, filter='icc_conf', do_patch=0) returned 0x%lx\n", probe_ret);
+    /* Шаг 1: pre-test на /dev/mp4/dump прямо сейчас (до нового патча) */
+    int fd0 = open("/dev/mp4/dump", 0x0002 /* O_RDWR */);
+    int err0 = errno;
+    klog_printf("[STEP1] /dev/mp4/dump pre-patch: fd=%d errno=%d\n", fd0, err0);
+    if (fd0 >= 0) {
+        klog_printf("[STEP1] *** VICTORY: /dev/mp4/dump OPENED WITHOUT NEW PATCH! fd=%d ***\n", fd0);
+        close(fd0);
+        return 0;
+    }
 
-    if (mp4_parent_csw) {
-        klog_printf("[WALK] Confirmed mp4 node '%s' under parent csw 0x%llx\n",
-                    mp4_node_name, (unsigned long long)mp4_parent_csw);
+    /* Шаг 2: sanity check на /dev/null */
+    int nfd = open("/dev/null", 0x0002 /* O_RDWR */);
+    int nerr = errno;
+    klog_printf("[STEP2] /dev/null sanity: fd=%d errno=%d\n", nfd, nerr);
+    if (nfd >= 0) close(nfd);
 
-        /* Дамп 192 байт mp4 cdevsw для извлечения d_open и d_close */
-        uint8_t mp4_csw_buf[192] = {0};
-        kekcall(KEKCALL_DUMP_MEM, mp4_parent_csw, (uintptr_t)mp4_csw_buf, 192);
-        uint64_t mp4_d_open_func = 0;
-        uint64_t mp4_d_close_func = 0;
-        __builtin_memcpy(&mp4_d_open_func, mp4_csw_buf + 0x10, 8);
-        __builtin_memcpy(&mp4_d_close_func, mp4_csw_buf + 0x20, 8);
-        klog_printf("[MP4_CSW] mp4 cdevsw @ 0x%llx d_open=0x%llx d_close=0x%llx\n",
-                    (unsigned long long)mp4_parent_csw, (unsigned long long)mp4_d_open_func,
-                    (unsigned long long)mp4_d_close_func);
+    if (!null_parent_csw) {
+        klog_printf("[STEP3] ERROR: null_csw not found in walk!\n");
+        return -1;
+    }
 
-        /* Прямой патч d_open через KEKCALL_WRITE64 (kekcall 27) на адрес d_close (+0x20) */
-        klog_printf("[PATCH] writing d_open via KEKCALL_WRITE64(27) to csw+0x10 (0x%llx) val=d_close (0x%llx)...\n",
-                    (unsigned long long)(mp4_parent_csw + 0x10ULL), (unsigned long long)mp4_d_close_func);
+    /* Шаг 3: достать null_dopen из null_csw + 0x10 */
+    uint64_t null_dopen = 0;
+    kekcall(KEKCALL_DUMP_MEM, null_parent_csw + 0x10ULL, (uintptr_t)&null_dopen, 8);
+    klog_printf("[STEP3] null_csw=0x%llx -> null_dopen=0x%llx\n",
+                (unsigned long long)null_parent_csw, (unsigned long long)null_dopen);
+    if (!null_dopen) {
+        klog_printf("[STEP3] ERROR: null_dopen is NULL!\n");
+        return -1;
+    }
 
-        long wr_ret = kekcall(27, mp4_parent_csw + 0x10ULL, mp4_d_close_func, 0);
-        klog_printf("[PATCH] KEKCALL_WRITE64 returned %ld\n", wr_ret);
+    /* Шаг 4: патчим все найденные mp4 cdevsw */
+    for (int m = 0; m < mp4_count; m++) {
+        uint64_t target_csw = mp4_parent_csws[m];
+        uint64_t orig_dopen = 0;
+        kekcall(KEKCALL_DUMP_MEM, target_csw + 0x10ULL, (uintptr_t)&orig_dopen, 8);
+        klog_printf("[STEP4] patching mp4 csw[%d] 0x%llx (node '%s'): orig=0x%llx -> null_dopen=0x%llx...\n",
+                    m, (unsigned long long)target_csw, mp4_names[m],
+                    (unsigned long long)orig_dopen, (unsigned long long)null_dopen);
 
-        /* Проверяем, изменился ли d_open */
-        uint64_t readback = 0;
-        kekcall(KEKCALL_DUMP_MEM, mp4_parent_csw + 0x10ULL, (uintptr_t)&readback, 8);
-        klog_printf("[PATCH] d_open readback = 0x%llx (orig 0x%llx, expected 0x%llx)\n",
-                    (unsigned long long)readback, (unsigned long long)mp4_d_open_func,
-                    (unsigned long long)mp4_d_close_func);
+        long wr = kekcall(27, target_csw + 0x10ULL, null_dopen, 0);
+        klog_printf("[STEP4] KEKCALL_WRITE64 ret=%ld\n", wr);
 
-        if (readback == mp4_d_close_func) {
-            klog_printf("[PATCH] *** BINGO! d_open PATCHED TO d_close! Running VFS probes... ***\n");
-
-            /* Тест 1: post-patch open основного пути */
-            int pfd = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
-            int perr = errno;
-            klog_printf("[TEST_VFS] open('/dev/mp4/dump_for_decid'): fd=%d errno=%d\n", pfd, perr);
-            if (pfd >= 0) {
-                klog_printf("[PATCH] *** SUCCESS! /dev/mp4/dump_for_decid OPENED! fd=%d ***\n", pfd);
-                close(pfd);
-            }
-
-            /* Тест 1.1: stat на /dev/mp4/dump_for_decid */
-            struct stat st;
-            memset(&st, 0, sizeof(st));
-            int sres = stat("/dev/mp4/dump_for_decid", &st);
-            int serr = errno;
-            klog_printf("[TEST_VFS] stat('/dev/mp4/dump_for_decid'): res=%d errno=%d mode=0%o ino=%lu\n",
-                        sres, serr, (unsigned int)st.st_mode, (unsigned long)st.st_ino);
-
-            /* Тест 2: перечисление содержимого /dev/mp4 через opendir/readdir */
-            DIR *dir = opendir("/dev/mp4");
-            if (dir) {
-                struct dirent *de;
-                while ((de = readdir(dir)) != NULL) {
-                    klog_printf("[DEV_MP4] entry: '%s' type=%d\n", de->d_name, (int)de->d_type);
-                }
-                closedir(dir);
-            } else {
-                klog_printf("[DEV_MP4] opendir('/dev/mp4') failed: errno=%d\n", errno);
-            }
-
-            /* Тест 3: проверка DECI-нод из walk (#50, #51, #52) */
-            const char *deci_nodes[] = {
-                "/dev/deci_mp4_ioc",
-                "/dev/deci_mp4_mmc",
-                "/dev/deci_coredump"
-            };
-            for (int ni = 0; ni < 3; ni++) {
-                int nfd = open(deci_nodes[ni], 0x0002 /* O_RDWR */);
-                int nerr = errno;
-                klog_printf("[TEST_VFS] open('%s'): fd=%d errno=%d\n", deci_nodes[ni], nfd, nerr);
-                if (nfd >= 0) {
-                    klog_printf("[TEST_VFS] *** SUCCESS! DECI NODE %s OPENED! fd=%d ***\n", deci_nodes[ni], nfd);
-                    close(nfd);
-                }
-            }
+        uint64_t rb = 0;
+        kekcall(KEKCALL_DUMP_MEM, target_csw + 0x10ULL, (uintptr_t)&rb, 8);
+        klog_printf("[STEP4] readback = 0x%llx (expected 0x%llx)\n",
+                    (unsigned long long)rb, (unsigned long long)null_dopen);
+        if (rb != null_dopen) {
+            klog_printf("[STEP4] FAIL: readback mismatch on csw 0x%llx!\n", (unsigned long long)target_csw);
+            return -1;
         }
-    } else {
-        klog_printf("[WALK] Notice: no node with 'mp4' or 'dump' in name was encountered.\n");
+    }
+
+    /* Шаг 5: open оба пути */
+    int fd1 = open("/dev/mp4/dump", 0x0002 /* O_RDWR */);
+    int err1 = errno;
+    klog_printf("[STEP5a] /dev/mp4/dump post-null-patch: fd=%d errno=%d\n", fd1, err1);
+    if (fd1 >= 0) {
+        klog_printf("[STEP5a] *** SUCCESS! /dev/mp4/dump OPENED! fd=%d ***\n", fd1);
+        close(fd1);
+    }
+
+    int fd2 = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
+    int err2 = errno;
+    klog_printf("[STEP5b] /dev/mp4/dump_for_decid post-null-patch: fd=%d errno=%d\n", fd2, err2);
+    if (fd2 >= 0) {
+        klog_printf("[STEP5b] *** SUCCESS! /dev/mp4/dump_for_decid OPENED! fd=%d ***\n", fd2);
+        close(fd2);
     }
 
     return 0;
