@@ -583,6 +583,7 @@ find_and_patch_mp4_cdevsw(void)
     int total_cdev_nodes = 0;
     uint64_t mp4_parent_csw = 0;
     uint64_t mp4_cdev_node = 0;
+    (void)mp4_cdev_node;
     char mp4_node_name[64] = {0};
 
     for (int idx = 0; idx < g_cdevsw_count; idx++) {
