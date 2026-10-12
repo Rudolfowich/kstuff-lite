@@ -506,65 +506,7 @@ scan_cdevsw(void)
 
     klog_printf("[CDVS] safe scan completed. Found %d cdevsw total.\n", total_cdevsw);
 
-    /* Диагностический дамп 192 байт известного cdevsw: icc_configuration */
-    klog_printf("[ICC] dumping 192 bytes of icc_configuration cdevsw @ 0xffffffffcd71fb78:\n");
-    uint8_t icc_buf[192] = {0};
-    g_sigsys_fault = 0;
-    if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
-        kekcall(KEKCALL_DUMP_MEM, 0xffffffffcd71fb78ULL, (uintptr_t)icc_buf, 192);
-        for (int off = 0; off < 192; off += 8) {
-            uint64_t v = 0;
-            __builtin_memcpy(&v, icc_buf + off, 8);
-            klog_printf("[ICC] +0x%02x = 0x%016llx\n", off, (unsigned long long)v);
-        }
-    } else {
-        klog_printf("[ICC] failed to dump icc_configuration\n");
-    }
-
-    /* Шаг #0: Диагностический дамп 256 байт struct cdev (icc0 / icc_configuration) */
-    klog_printf("[CDEV0] dumping 256 bytes of struct cdev @ 0xffff937101989200:\n");
-    uint8_t cdev_buf[256] = {0};
-    g_sigsys_fault = 0;
-    if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
-        kekcall(KEKCALL_DUMP_MEM, 0xffff937101989200ULL, (uintptr_t)cdev_buf, 256);
-        for (int off = 0; off < 256; off += 8) {
-            uint64_t v = 0;
-            __builtin_memcpy(&v, cdev_buf + off, 8);
-
-            /* Проверяем, не лежит ли строка прямо inline внутри буфера cdev (например __si_namebuf) */
-            char inline_str[9] = {0};
-            __builtin_memcpy(inline_str, cdev_buf + off, 8);
-            int is_inline_ascii = 1;
-            for (int k = 0; k < 8; k++) {
-                if (inline_str[k] == 0) break;
-                if (inline_str[k] < 32 || inline_str[k] > 126) { is_inline_ascii = 0; break; }
-            }
-
-            /* Пробуем прочитать первые 16 байт строки, если это валидный указатель ядра/кучи */
-            char preview[16] = {0};
-            if ((v & 0xFFFF000000000000ULL) == 0xFFFF000000000000ULL) {
-                g_sigsys_fault = 0;
-                if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
-                    uint64_t s_words[2] = {0};
-                    kekcall(KEKCALL_DUMP_MEM, v, (uintptr_t)s_words, 16);
-                    memcpy(preview, s_words, 15);
-                    for (int k = 0; k < 15; k++) {
-                        if (preview[k] < 32 || preview[k] > 126) { preview[k] = 0; break; }
-                    }
-                }
-            }
-
-            if (preview[0]) {
-                klog_printf("[CDEV0] +0x%02x = 0x%016llx  ptr_str='%s'\n", off, (unsigned long long)v, preview);
-            } else if (is_inline_ascii && inline_str[0] >= 'a' && inline_str[0] <= 'z') {
-                klog_printf("[CDEV0] +0x%02x = 0x%016llx  inline='%s'\n", off, (unsigned long long)v, inline_str);
-            } else {
-                klog_printf("[CDEV0] +0x%02x = 0x%016llx\n", off, (unsigned long long)v);
-            }
-        }
-    } else {
-        klog_printf("[CDEV0] failed to dump struct cdev\n");
-    }
+    /* Завершение сканирования cdevsw */
 
     /* Восстанавливаем дефолтный обработчик SIGSYS */
     signal(SIGSYS, SIG_DFL);
@@ -581,22 +523,40 @@ probe_opened_mp4_fd(int fd, const char *name)
     if (strstr(name, "dump_for_decid")) {
         klog_printf("[INIT_PROBE] === Starting comprehensive session init on %s (fd=%d) ===\n", name, fd);
 
-        /* Шаг 1: Сканирование ioctl диапазонов */
-        uint8_t ioctl_buf[256] = {0};
-        const uint32_t ioctl_bases[] = {0x40044400, 0x80044400, 0xC0184400, 0xC0084400, 0x20004400, 0x40044D00, 0x80044D00, 0xC0184D00};
-        for (int b = 0; b < 8; b++) {
-            uint32_t base = ioctl_bases[b];
-            for (uint32_t cmd = base; cmd <= base + 0x10; cmd++) {
-                errno = 0;
-                int r = ioctl(fd, cmd, ioctl_buf);
-                int err = errno;
-                if (r != -1 || err != 25 /* ENOTTY */) {
-                    klog_printf("[IOCTL_HIT] cmd=0x%08x ret=%d errno=%d *** RECOGNIZED! ***\n", cmd, r, err);
+        /* Шаг 1: Сканирование ioctl диапазонов (включая расширенные группы Sony M, D, AF) */
+        uint8_t ibuf[256] = {0};
+        uint32_t groups[] = {
+            0x40044400, 0x80044400, 0xC0184400, 
+            0x40044D00, 0x80044D00, 0xC0184D00,
+            0x4004AF00, 0x8004AF00, 0xC018AF00
+        };
+        for (int g = 0; g < 9; g++) {
+            for (uint32_t cmd = groups[g]; cmd <= groups[g] + 0x1F; cmd++) {
+                int r = ioctl(fd, cmd, ibuf);
+                int e = errno;
+                if (e != 25 /* ENOTTY */) {
+                    klog_printf("[IOCTL_HIT] 0x%08x ret=%d errno=%d *** RECOGNIZED! ***\n", cmd, r, e);
                 }
             }
         }
 
-        /* Шаг 2: Handshake-записи с магическими заголовками */
+        /* Дополнительное сканирование стандартных команд _IOWR('M'..'V', 0..31) */
+        for (int group = 'M'; group <= 'V'; group++) {
+            for (int num = 0; num < 32; num++) {
+                uint32_t cmd = (0xC0184000 | (group << 8) | num);
+                int r = ioctl(fd, cmd, ibuf);
+                int e = errno;
+                if (e != 25 /* ENOTTY */) {
+                    klog_printf("[IOCTL_HIT_SONY] 0x%08x ret=%d errno=%d *** RECOGNIZED! ***\n", cmd, r, e);
+                }
+            }
+        }
+
+        /* Шаг 2: Повторный write после IOCTL probe */
+        ssize_t nw = write(fd, "\x01\x00\x00\x00\x00\x00\x00\x00", 8);
+        klog_printf("[POST_IOCTL_WRITE] nw=%zd errno=%d\n", nw, errno);
+
+        /* Шаг 3: Handshake-записи с магическими заголовками */
         const uint8_t magics[][8] = {
             {0x44,0x45,0x43,0x49, 0x01,0x00,0x00,0x00},  /* "DECI" + ver 1 */
             {0x4D,0x50,0x34,0x44, 0x01,0x00,0x00,0x00},  /* "MP4D" + ver 1 */
@@ -608,7 +568,7 @@ probe_opened_mp4_fd(int fd, const char *name)
 
         for (int i = 0; i < 6; i++) {
             errno = 0;
-            ssize_t nw = write(fd, magics[i], 8);
+            ssize_t nw_magic = write(fd, magics[i], 8);
             int werr = errno;
             uint8_t resp[256] = {0};
             errno = 0;
@@ -616,7 +576,7 @@ probe_opened_mp4_fd(int fd, const char *name)
             int rerr = errno;
 
             klog_printf("[INIT_%d] nw=%zd (errno=%d) nr=%zd (errno=%d) first_u32=0x%08x\n",
-                        i, nw, werr, nr, rerr, *(uint32_t*)resp);
+                        i, nw_magic, werr, nr, rerr, *(uint32_t*)resp);
 
             if (nr > 0) {
                 klog_printf("[INIT_HIT] *** BINGO! %s session produced %zd bytes! ***\n", name, nr);
@@ -628,7 +588,7 @@ probe_opened_mp4_fd(int fd, const char *name)
             }
         }
 
-        /* Шаг 3: Повторный read после всех попыток инициализации */
+        /* Шаг 4: Повторный read после всех попыток инициализации */
         uint8_t final_buf[256] = {0};
         errno = 0;
         ssize_t nr_final = read(fd, final_buf, sizeof(final_buf));
@@ -796,21 +756,12 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     }
 
     /* Микро-тест чтения памяти через KEKCALL_DUMP_MEM */
-    klog_printf("[READ_TEST] === Starting 3-step micro-test ===\n");
-
-    /* Шаг 1: Прочитать 16 байт .data (null_parent_csw) */
+    klog_printf("[READ_TEST] === Memory dump sanity check ===\n");
     uint64_t data_v = null_parent_csw;
     char data_bytes[16] = {0};
     long r_data = kekcall(KEKCALL_DUMP_MEM, data_v, (uintptr_t)data_bytes, 16);
-    klog_printf("[READ_TEST] Step 1 (.data @ 0x%llx): ret=%ld, first_u64=0x%lx\n",
+    klog_printf("[READ_TEST] (.data @ 0x%llx): ret=%ld, first_u64=0x%lx\n",
                 (unsigned long long)data_v, r_data, *(unsigned long*)data_bytes);
-
-    /* Шаг 2: Прочитать 16 байт .rodata */
-    uint64_t rodata_v = 0xffffffff9052ccb4ULL;
-    char rodata_bytes[16] = {0};
-    long r_rodata = kekcall(KEKCALL_DUMP_MEM, rodata_v, (uintptr_t)rodata_bytes, 16);
-    klog_printf("[READ_TEST] Step 2 (.rodata @ 0x%llx): ret=%ld, str='%.16s'\n",
-                (unsigned long long)rodata_v, r_rodata, rodata_bytes);
 
     /* Шаг 3: Полная энумерация ВСЕХ процессов через KEKCALL_ENUM_ALLPROC (nr 29) */
     klog_printf("[AUTH_ENUM] === ENUMERATING ALL PROCESSES VIA KERNEL allproc SYMBOL (KEKCALL 29) ===\n");
@@ -947,13 +898,13 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         }
     }
 
-    /* Шаг 5: Проверка всех целевых каналов (DECI + dump) */
+    /* Шаг 5: Проверка целевых каналов (приоритет: mp4/dump_for_decid СРАЗУ ПЕРВЫМ) */
     const char *test_paths[] = {
-        "/dev/deci_mp4_ioc",
-        "/dev/deci_mp4_mmc",
-        "/dev/deci_coredump",
         "/dev/mp4/dump_for_decid",
-        "/dev/mp4/dump"
+        "/dev/mp4/dump",
+        "/dev/deci_mp4_mmc",
+        "/dev/deci_mp4_ioc",
+        "/dev/deci_coredump"
     };
 
     for (int p = 0; p < (int)(sizeof(test_paths)/sizeof(test_paths[0])); p++) {
