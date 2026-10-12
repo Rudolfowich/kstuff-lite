@@ -362,9 +362,9 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
     }
     else if(nr == 16)
     {
-        /* SWAP_FULL_FROM_PID: td_ucred + p_ucred + p_fd от target_pid.
+        /* SWAP_FULL_FROM_PID: td_ucred + p_ucred от target_pid (БЕЗ p_fd!).
          * args[RDI] = target_pid (uint32_t)
-         * args[RSI] = user_buf  (32 байта backup: backup[0..2])
+         * args[RSI] = user_buf  (32 байта backup: backup[0..1])
          * regs[RDI] = curthread */
         uint32_t target_pid = (uint32_t)args[RDI];
         uint64_t user_buf   = args[RSI];
@@ -376,27 +376,25 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         uint64_t p = 0;
         kpeek64_checked((uint64_t)allproc, &p);
 
-        uint64_t t_ucred = 0, t_fd = 0;
+        uint64_t t_ucred = 0;
         unsigned safety = 0;
         while (p && safety++ < 500) {
             uint64_t pid_u64 = 0;
-            /* p_pid at proc+0x2C0 (ext[128]=0xDF=223=our pid, verified) */
             kpeek64_checked(p + 0x2C0, &pid_u64);
             if ((uint32_t)(pid_u64 & 0xFFFFFFFF) == target_pid) {
                 kpeek64_checked(p + 0x40, &t_ucred);
-                kpeek64_checked(p + 0x48, &t_fd);
                 break;
             }
             uint64_t next = 0;
             kpeek64_checked(p, &next);
             p = next;
         }
-        if (!t_ucred || !t_fd) return 2;
+        if (!t_ucred) return 2;
 
         uint64_t backup[4] = {0};
         kpeek64_checked(td + 0x140,  &backup[0]);   /* old td_ucred */
         kpeek64_checked(proc + 0x40, &backup[1]);   /* old p_ucred */
-        kpeek64_checked(proc + 0x48, &backup[2]);   /* old p_fd */
+        backup[2] = 0;
         backup[3] = 0;
         if (user_buf) {
             if (copy_to_kernel(user_buf, backup, sizeof(backup)))
@@ -405,13 +403,13 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
 
         kpoke64(td + 0x140,  t_ucred);
         kpoke64(proc + 0x40, t_ucred);
-        kpoke64(proc + 0x48, t_fd);   /* fixed: was 0x60 */
+        /* ВАЖНО: p_fd НЕ трогаем! Подмена p_fd ломает таблицу дескрипторов при open() */
         args[RAX] = 0;
         return 0;
     }
     else if(nr == 17)
     {
-        /* RESTORE_FULL: восстановить td_ucred + p_ucred + p_fd из user_buf.
+        /* RESTORE_FULL: восстановить td_ucred + p_ucred из user_buf.
          * args[RSI] = user_buf (32 байта)
          * regs[RDI] = curthread */
         uint64_t td       = regs[RDI];
@@ -426,7 +424,6 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
 
         kpoke64(td + 0x140,  backup[0]);
         kpoke64(proc + 0x40, backup[1]);
-        kpoke64(proc + 0x48, backup[2]);   /* p_fd */
         args[RAX] = 0;
         return 0;
     }
