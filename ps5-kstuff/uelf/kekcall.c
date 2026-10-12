@@ -507,14 +507,13 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         if (!target || !user_buf) return 1;
 
         uint64_t scan_abs = (scan_mb_signed < 0) ? -scan_mb_signed : scan_mb_signed;
-        if (scan_abs == 0 || scan_abs > 128) scan_abs = 16;
-
-        extern char kdata_base[];
-        uint64_t kbase = (uint64_t)kdata_base;
-        uint64_t start = (scan_mb_signed < 0) 
-                         ? kbase - (scan_abs * 1024ULL * 1024ULL) 
-                         : kbase;
+        if (scan_abs == 0 || scan_abs > 128) scan_abs = 10;
         uint64_t scan_bytes = scan_abs * 1024ULL * 1024ULL;
+
+        /* Сканируем вокруг САМОЙ строки target в .text/.rodata ядра */
+        uint64_t start = (scan_mb_signed < 0)
+                         ? (target - scan_bytes)
+                         : target;
 
         uint64_t finds[32] = {0};
         unsigned nfound = 0;

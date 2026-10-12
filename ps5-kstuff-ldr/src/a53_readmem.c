@@ -121,51 +121,46 @@ probe_mp4_device(void)
                     (unsigned long long)(base + i*8));
     }
 
-    /* 3. Scan heap для указателя на str_addr (как 8-байт значение) */
-    klog_printf("[a53] === scan for pointer 0x%llx (8-byte needle) in heap ===\n",
-                (unsigned long long)str_addr);
-    uint64_t scan_starts[] = {
-        ucred_va ? (ucred_va - (64ULL * 1024 * 1024)) : 0,
-        proc_va  ? (proc_va  - (64ULL * 1024 * 1024)) : 0,
-        fd_va    ? (fd_va    - (64ULL * 1024 * 1024)) : 0,
-    };
-    const char *labels[] = {"ucred", "proc", "fd"};
+    /* 3. Scan .text for XREF to str_addr */
+    static uint64_t g_xref[32];
 
-    for (int s = 0; s < 3; s++) {
-        if (!scan_starts[s]) continue;
-        for (int i = 0; i < 32; i++) g_finds[i] = 0;
-        long nptr = kekcall5(KEKCALL_SCAN_DMEM, 128, (uintptr_t)g_finds, scan_starts[s], str_addr);
-        klog_printf("[a53] ptr @%s (0x%llx): total=%ld\n",
-                    labels[s], (unsigned long long)scan_starts[s], nptr);
-        for (int i = 0; i < 32; i++) {
-            if (g_finds[i]) {
-                klog_printf("[a53]   ptr[%2d] = 0x%016llx (cdev_candidate = 0x%llx)\n",
-                            i, (unsigned long long)g_finds[i],
-                            (unsigned long long)(g_finds[i] - 0x98));
+    /* 3.1 XREF НАЗАД (отрицательный offset: -10 МБ от str_addr) */
+    for (int i = 0; i < 32; i++) g_xref[i] = 0;
+    klog_printf("[a53] xref scan: 10MB backward from 0x%llx ...\n", (unsigned long long)str_addr);
+    long n_back = kekcall(KEKCALL_SCAN_XREF, str_addr, (uintptr_t)g_xref, (uint64_t)-10LL);
+    klog_printf("[a53] xref backward total=%ld\n", n_back);
+    for (int i = 0; i < 32; i++) {
+        if (g_xref[i]) {
+            klog_printf("[a53]   xref_back[%d] = 0x%016llx\n", i, (unsigned long long)g_xref[i]);
+            /* Дампим инструкции вокруг XREF */
+            kekcall(KEKCALL_DUMP_MEM, g_xref[i], (uintptr_t)g_dump, 0);
+            for (int d = 0; d < 16; d++) {
+                klog_printf("[a53]     xref_code[%+3d] = 0x%016llx @ 0x%llx\n",
+                            (d - 8)*8, (unsigned long long)g_dump[d + 24],
+                            (unsigned long long)(((g_xref[i] - 256) & ~7ULL) + (d + 24)*8));
             }
-        }
-        if (nptr > 0) {
-            klog_puts("[a53] FOUND pointer in heap! Dumping surroundings of cdev...\n");
-            for (int a = 0; a < 4 && a < nptr; a++) {
-                uint64_t cdev_ptr = g_finds[a] - 0x98;
-                klog_printf("[a53] dumping candidate cdev at 0x%llx (ptr at 0x%llx)...\n",
-                            (unsigned long long)cdev_ptr, (unsigned long long)g_finds[a]);
-                for (int i = 0; i < 64; i++) g_dump[i] = 0;
-                kekcall(KEKCALL_DUMP_MEM, g_finds[a], (uintptr_t)g_dump, 0);
-                for (int i = 0; i < 64; i++) {
-                    char asc[9] = {0};
-                    memcpy(asc, &g_dump[i], 8);
-                    for (int c = 0; c < 8; c++) if ((unsigned char)asc[c] < 32 || (unsigned char)asc[c] > 126) asc[c] = '.';
-                    klog_printf("[a53]   [%+4d] 0x%016llx '%s' @ 0x%llx\n",
-                                (i - 32) * 8, (unsigned long long)g_dump[i], asc,
-                                (unsigned long long)(((g_finds[a] - 256) & ~7ULL) + i*8));
-                }
-            }
-            return 0;
         }
     }
 
-    return 0;
+    /* 3.2 XREF ВПЕРЁД (+10 МБ от str_addr) */
+    for (int i = 0; i < 32; i++) g_xref[i] = 0;
+    klog_printf("[a53] xref scan: 10MB forward from 0x%llx ...\n", (unsigned long long)str_addr);
+    long n_fwd = kekcall(KEKCALL_SCAN_XREF, str_addr, (uintptr_t)g_xref, 10);
+    klog_printf("[a53] xref forward total=%ld\n", n_fwd);
+    for (int i = 0; i < 32; i++) {
+        if (g_xref[i]) {
+            klog_printf("[a53]   xref_fwd[%d] = 0x%016llx\n", i, (unsigned long long)g_xref[i]);
+            /* Дампим инструкции вокруг XREF */
+            kekcall(KEKCALL_DUMP_MEM, g_xref[i], (uintptr_t)g_dump, 0);
+            for (int d = 0; d < 16; d++) {
+                klog_printf("[a53]     xref_code[%+3d] = 0x%016llx @ 0x%llx\n",
+                            (d - 8)*8, (unsigned long long)g_dump[d + 24],
+                            (unsigned long long)(((g_xref[i] - 256) & ~7ULL) + (d + 24)*8));
+            }
+        }
+    }
+
+    return (n_back + n_fwd > 0) ? 0 : -1;
 }
 
 /* ---- Main install entry --------------------------------------------- */
