@@ -805,11 +805,11 @@ find_and_patch_mp4_cdevsw(void)
 
         kekcall(KEKCALL_DUMP_MEM, p + 0xBC, (uintptr_t)&pid_u64, 8);
         kekcall(KEKCALL_DUMP_MEM, p + 0x448, (uintptr_t)comm, 32);
-        kekcall(KEKCALL_DUMP_MEM, p + 0x40, (uintptr_t)&ucred_ptr, 8);
+        kekcall(KEKCALL_DUMP_MEM, p + 0x48, (uintptr_t)&ucred_ptr, 8);
         comm[31] = 0;
         uint32_t pid = (uint32_t)(pid_u64 & 0xFFFFFFFF);
 
-        if (ucred_ptr) {
+        if (ucred_ptr > 0xffff800000000000ULL) {
             kekcall(KEKCALL_DUMP_MEM, ucred_ptr + 0x58, (uintptr_t)&authid, 8);
         }
 
@@ -831,7 +831,7 @@ find_and_patch_mp4_cdevsw(void)
         }
 
         uint64_t next = 0;
-        kekcall(KEKCALL_DUMP_MEM, p + 0x00, (uintptr_t)&next, 8);
+        kekcall(KEKCALL_DUMP_MEM, p + 0x10, (uintptr_t)&next, 8);
         p = next;
     }
 
