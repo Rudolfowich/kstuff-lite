@@ -383,48 +383,38 @@ walk_find_mp4_cdevsw(uint64_t curproc_hint)
 int
 scan_cdevsw(void)
 {
-    klog_printf("[CDVS] kernel-side scan .data for cdevsw (KEKCALL_SCAN_CDEVSW 26)\n");
+    klog_printf("[CDVS] kernel-side scan & patch for mp4 cdevsw (KEKCALL_SCAN_CDEVSW 26)\n");
 
-    /* Buffer for up to 16 entries (4 qwords each) */
-    uint64_t results[64] = {0};
-
-    /* Сначала ищем драйверы, начинающиеся на 'mp4' (0x34706d = 'mp4') */
+    /* filter = "mp4" (0x34706d), do_patch = 1 */
     uint64_t mp4_filter = 0;
     memcpy(&mp4_filter, "mp4", 3);
 
-    long n = kekcall(KEKCALL_SCAN_CDEVSW, (uintptr_t)results, 16, mp4_filter);
-    klog_printf("[CDVS] kekcall(26, filter='mp4') returned %ld entries\n", n);
+    uint64_t cdevsw_mp4 = (uint64_t)kekcall(KEKCALL_SCAN_CDEVSW, mp4_filter, 1, 0);
+    klog_printf("[CDVS] kekcall(26, filter='mp4', do_patch=1) -> cdevsw_mp4 = 0x%llx\n",
+                (unsigned long long)cdevsw_mp4);
 
-    if (n > 0) {
-        for (long i = 0; i < n && i < 16; i++) {
-            uint64_t cdevsw_addr = results[i * 4 + 0];
-            uint64_t d_open_addr = results[i * 4 + 1];
-            char name[9] = {0};
-            memcpy(name, &results[i * 4 + 2], 8);
-            uint32_t ver = (uint32_t)results[i * 4 + 3];
+    if (cdevsw_mp4) {
+        klog_printf("[CDVS] *** MP4 CDEVSW FOUND & PATCHED WITH justreturn! ***\n");
 
-            klog_printf("[CDVS] *** FOUND mp4 cdevsw! @ 0x%llx ver=0x%08x name='%s' d_open=0x%llx ***\n",
-                        (unsigned long long)cdevsw_addr, ver, name,
-                        (unsigned long long)d_open_addr);
+        /* Проверяем открытие устройства /dev/mp4/dump сразу после патча */
+        klog_printf("[CDVS] now opening /dev/mp4/dump after d_open patch...\n");
+        int fd = open("/dev/mp4/dump", O_RDWR);
+        int err = errno;
+        klog_printf("[CDVS] open('/dev/mp4/dump', O_RDWR) -> fd=%d (errno=%d)\n", fd, err);
+
+        if (fd >= 0) {
+            klog_printf("[CDVS] ******************************************************\n");
+            klog_printf("[CDVS] *** SUCCESS! /dev/mp4/dump OPENED SUCCESSFULLY! (fd=%d) ***\n", fd);
+            klog_printf("[CDVS] ******************************************************\n");
+            close(fd);
+        } else {
+            klog_printf("[CDVS] open failed: errno=%d\n", err);
         }
-    }
-
-    /* Также сделаем общий скан без фильтра для диагностики доступных cdevsw */
-    uint64_t all_results[64] = {0};
-    long n_all = kekcall(KEKCALL_SCAN_CDEVSW, (uintptr_t)all_results, 16, 0);
-    klog_printf("[CDVS] kekcall(26, all) returned %ld entries\n", n_all);
-    if (n_all > 0) {
-        for (long i = 0; i < n_all && i < 16; i++) {
-            uint64_t cdevsw_addr = all_results[i * 4 + 0];
-            uint64_t d_open_addr = all_results[i * 4 + 1];
-            char name[9] = {0};
-            memcpy(name, &all_results[i * 4 + 2], 8);
-            uint32_t ver = (uint32_t)all_results[i * 4 + 3];
-
-            klog_printf("[CDVS] #%ld @ 0x%llx ver=0x%08x name='%s' d_open=0x%llx\n",
-                        i, (unsigned long long)cdevsw_addr, ver, name,
-                        (unsigned long long)d_open_addr);
-        }
+    } else {
+        klog_printf("[CDVS] mp4 cdevsw not found by filter, checking without filter...\n");
+        uint64_t any_cdevsw = (uint64_t)kekcall(KEKCALL_SCAN_CDEVSW, 0, 0, 0);
+        klog_printf("[CDVS] kekcall(26, filter=0) -> first cdevsw = 0x%llx\n",
+                    (unsigned long long)any_cdevsw);
     }
 
     return 0;
