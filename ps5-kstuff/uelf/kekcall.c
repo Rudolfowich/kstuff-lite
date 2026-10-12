@@ -432,19 +432,19 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
     }
     else if(nr == 18)
     {
-        /* SCAN_DMEM_FOR_STRING: ищем "mp4/dump" в ядре с signed offset.
+        /* SCAN_DMEM_FOR_STRING: ищем "mp4/dump" в ядре.
          * args[RDI] = scan_mb (размер скана, в МБ; default 32)
          * args[RSI] = user_buf (uint64_t[32] для адресов находок)
-         * args[RDX] = sign_off (смещение от kdata_base, int64_t)
+         * args[RDX] = start_abs (абсолютный адрес; 0 = kdata_base)
          * return: число находок */
         uint64_t user_buf = args[RSI];
         uint64_t scan_mb = args[RDI];
-        int64_t sign_off = (int64_t)args[RDX];
+        uint64_t start_abs = args[RDX];  /* абсолютный адрес; 0 = kdata_base */
         if (!user_buf) return 1;
         if (scan_mb == 0 || scan_mb > 256) scan_mb = 32;
 
         extern char kdata_base[];
-        uint64_t kbase = (uint64_t)kdata_base + sign_off;
+        uint64_t kbase = start_abs ? start_abs : (uint64_t)kdata_base;
         uint64_t scan_bytes = scan_mb * 1024ULL * 1024ULL;
 
         /* Pattern: "mp4/dump" little-endian u64 */
@@ -472,11 +472,14 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
             }
         }
 
-        /* Используем copyout напрямую (safer для userland target) */
+        /* ВАЖНО: используем copyout напрямую — safer для userland dest */
         extern char copyout[];
-        int (*copyout_fn)(const void *, void *, size_t) = (void*)copyout;
-        if (copyout_fn(finds, (void*)user_buf, sizeof(finds)) != 0)
-            return EFAULT;
+        typedef int (*copyout_fn_t)(const void *, void *, size_t);
+        if (((copyout_fn_t)copyout)(finds, (void*)user_buf, sizeof(finds)) != 0) {
+            /* fallback если copyout недоступен */
+            if (copy_to_kernel(user_buf, finds, sizeof(finds)) != 0)
+                return EFAULT;
+        }
 
         args[RAX] = total;
         return 0;
