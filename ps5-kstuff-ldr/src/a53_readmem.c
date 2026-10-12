@@ -31,6 +31,7 @@
 #include <fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/ioccom.h>
+#include <sys/mman.h>
 #include <signal.h>
 #include <setjmp.h>
 
@@ -940,78 +941,180 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         }
     }
 
-    /* Шаг 3.2: Прогон всех отобранных кандидатов на нативном d_open с KEKCALL_SWAP_BY_UCRED */
-    klog_printf("[REAL_OPEN] === Testing native open under %d candidates with SWAP_BY_UCRED ===\n", ncand);
+    /* ========================================================================= */
+    /* ПРИОРИТЕТНЫЙ БЛОК: ТРИ НЕЗАВИСИМЫХ ТЕСТА В СТРОГОМ ПОРЯДКЕ               */
+    /* ========================================================================= */
 
-    for (int c = 0; c < ncand; c++) {
+    /* Шаг 0: Baseline state check */
+    {
+        int bfd = open("/dev/mp4/dump_for_decid", O_RDWR);
+        int berr = errno;
+        klog_printf("[STATE_CHECK baseline] native d_open: fd=%d errno=%d\n", bfd, berr);
+        if (bfd >= 0) close(bfd);
+    }
+
+    /* ------------------------------------------------------------------------- */
+    /* ТЕСТ 1 — MAX_CAPS alone (ГЛАВНЫЙ)                                         */
+    /* Наш процесс, без swap ucred, только cr_sce_caps забиты 0xFF               */
+    /* ------------------------------------------------------------------------- */
+    klog_printf("[TEST1_START] === TEST 1: MAX_CAPS alone on native d_open ===\n");
+    {
+        uint64_t caps_bkp[10] = {0};
+        long mc_ret = kekcall(KEKCALL_MAX_CAPS, 0, (uintptr_t)caps_bkp, 0);
+        klog_printf("[MAX_CAPS_SET] kekcall(12) ret=%ld\n", mc_ret);
+
+        errno = 0;
+        int fd = open("/dev/mp4/dump_for_decid", O_RDWR);
+        int e = errno;
+        if (fd < 0 && e == 1 /* EPERM */) {
+            fd = open("/dev/mp4/dump_for_decid", O_RDONLY);
+            e = errno;
+        }
+        klog_printf("[MAX_CAPS_OPEN] fd=%d errno=%d\n", fd, e);
+
+        if (fd >= 0) {
+            klog_printf("[MAX_CAPS_OPEN] *** BINGO! /dev/mp4/dump_for_decid OPENED WITH MAX_CAPS! ***\n");
+            uint8_t init_cmd[4] = {0x01, 0x00, 0x00, 0x00};
+            errno = 0;
+            ssize_t nw = write(fd, init_cmd, 4);
+            int we = errno;
+            klog_printf("[MAX_CAPS_WRITE] nw=%zd errno=%d\n", nw, we);
+
+            uint8_t rdata[256] = {0};
+            errno = 0;
+            ssize_t nr = read(fd, rdata, sizeof(rdata));
+            int re = errno;
+            klog_printf("[MAX_CAPS_READ] nr=%zd errno=%d\n", nr, re);
+            if (nr > 0) {
+                klog_printf("[MAX_CAPS_DATA] first_u32=0x%08x\n", *(uint32_t*)rdata);
+            }
+            close(fd);
+        }
+
+        /* Восстановление caps */
+        long rc_ret = kekcall(KEKCALL_RESTORE_CAPS, 0, (uintptr_t)caps_bkp, 0);
+        klog_printf("[MAX_CAPS_RESTORE] kekcall(13) ret=%ld\n", rc_ret);
+    }
+    {
+        int bfd = open("/dev/mp4/dump_for_decid", O_RDWR);
+        int berr = errno;
+        klog_printf("[STATE_CHECK post-test1] native d_open: fd=%d errno=%d\n", bfd, berr);
+        if (bfd >= 0) close(bfd);
+    }
+
+    /* ------------------------------------------------------------------------- */
+    /* ТЕСТ 3 — d_mmap bypass (через nullopen)                                   */
+    /* ------------------------------------------------------------------------- */
+    klog_printf("[TEST3_START] === TEST 3: d_mmap bypass via nullopen ===\n");
+    if (dedicated_mp4_csw) {
+        /* 1. Патчим d_open на null_dopen для получения валидного fd */
+        kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, null_dopen, 0);
+
+        int fd_mmap = open("/dev/mp4/dump_for_decid", O_RDWR);
+        int me = errno;
+        klog_printf("[MMAP_FD] nullopen fd=%d errno=%d\n", fd_mmap, me);
+
+        if (fd_mmap >= 0) {
+            /* Пробуем разные комбинации mmap */
+            void *m = mmap(NULL, 0x100000, PROT_READ, MAP_SHARED, fd_mmap, 0);
+            int m_err = errno;
+            klog_printf("[MMAP_RESULT] PROT_READ MAP_SHARED: ptr=%p errno=%d\n", m, m_err);
+
+            if (m == MAP_FAILED) {
+                m = mmap(NULL, 0x100000, PROT_READ | PROT_WRITE, MAP_SHARED, fd_mmap, 0);
+                m_err = errno;
+                klog_printf("[MMAP_RESULT] RW MAP_SHARED: ptr=%p errno=%d\n", m, m_err);
+            }
+            if (m == MAP_FAILED) {
+                m = mmap(NULL, 0x4000, PROT_READ, MAP_PRIVATE, fd_mmap, 0);
+                m_err = errno;
+                klog_printf("[MMAP_RESULT] PROT_READ MAP_PRIVATE (16K): ptr=%p errno=%d\n", m, m_err);
+            }
+
+            if (m != MAP_FAILED && m != NULL) {
+                klog_printf("[MMAP_SUCCESS] *** SUCCESS! Mapped driver memory at %p! ***\n", m);
+                uint8_t *mb = (uint8_t *)m;
+                for (int i = 0; i < 256; i += 16) {
+                    klog_printf("[MM+0x%02x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                i, mb[i], mb[i+1], mb[i+2], mb[i+3],
+                                mb[i+4], mb[i+5], mb[i+6], mb[i+7],
+                                mb[i+8], mb[i+9], mb[i+10], mb[i+11],
+                                mb[i+12], mb[i+13], mb[i+14], mb[i+15]);
+                }
+                munmap(m, 0x100000);
+            }
+            close(fd_mmap);
+        }
+
+        /* 2. Возвращаем оригинальный d_open */
+        kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, orig_dopen_calc, 0);
+    }
+    {
+        int bfd = open("/dev/mp4/dump_for_decid", O_RDWR);
+        int berr = errno;
+        klog_printf("[STATE_CHECK post-test3] native d_open restored: fd=%d errno=%d\n", bfd, berr);
+        if (bfd >= 0) close(bfd);
+    }
+
+    /* ------------------------------------------------------------------------- */
+    /* ТЕСТ 2 — MAX_CAPS + SWAP (комбо-удар)                                     */
+    /* Пробуем на топ-5 кандидатах с media и debug аутентификацией               */
+    /* ------------------------------------------------------------------------- */
+    klog_printf("[TEST2_START] === TEST 2: MAX_CAPS + SWAP combo on native d_open ===\n");
+    for (int c = 0; c < ncand && c < 5; c++) {
         uint32_t tpid = g_cand_pids[c];
         uint64_t tauth = g_cand_authids[c];
         uint64_t tucred = g_cand_ucreds[c];
-
-        /* Обязательный debug-лог ПЕРЕД swap */
-        klog_printf("[LOOP_PRE #%d] cand_pid=%u authid=0x%llx ucred=0x%llx\n",
-                    c, (unsigned int)tpid, (unsigned long long)tauth, (unsigned long long)tucred);
-
         if (!tucred) continue;
 
-        /* Защита: boost ucred refcount на +100 */
-        if ((tucred & 0xFFFF000000000000ULL) == 0xFFFF000000000000ULL) {
-            uint32_t ref = 0;
-            kekcall(KEKCALL_DUMP_MEM, tucred, (uintptr_t)&ref, 4);
-            if (ref > 0 && ref < 100000) {
-                kekcall(27 /* WRITE64 */, tucred, ref + 100, 4);
-            }
+        uint64_t caps_bkp[10] = {0};
+        uint64_t swap_bkp[4] = {0};
+
+        /* 1. Ставим max caps нашему процессу */
+        kekcall(KEKCALL_MAX_CAPS, 0, (uintptr_t)caps_bkp, 0);
+
+        /* 2. Подменяем ucred на кандидата */
+        long sr = kekcall(KEKCALL_SWAP_BY_UCRED, tucred, (uintptr_t)swap_bkp, 0);
+
+        /* 3. Также ставим max caps на целевой ucred (на случай если он проверяет caps целевого ucred) */
+        kekcall(KEKCALL_MAX_CAPS, 0, (uintptr_t)caps_bkp, 0);
+
+        errno = 0;
+        int fd = open("/dev/mp4/dump_for_decid", O_RDWR);
+        int e = errno;
+        if (fd < 0 && e == 1) {
+            fd = open("/dev/mp4/dump_for_decid", O_RDONLY);
+            e = errno;
         }
 
-        uint64_t backup[4] = {0};
-        int fd_test = -1;
-        int err_test = 0;
         ssize_t nw = -1;
-        int werr = 0;
-        uint8_t native_buf[256] = {0};
-        ssize_t nr = -1;
-        int rerr = 0;
-        (void)rerr;
-
-        /* КРИТИЧЕСКИЙ SAFETY БЛОК: СВАП ЧЕРЕЗ KEKCALL 30 НАПРЯМУЮ ПО TUCRED */
-        long sr = kekcall(KEKCALL_SWAP_BY_UCRED, tucred, (uintptr_t)backup, 0);
-        if (sr == 0) {
-            fd_test = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
-            err_test = errno;
-            if (fd_test < 0 && err_test == 1) {
-                fd_test = open("/dev/mp4/dump_for_decid", 0x0000 /* O_RDONLY */);
-                err_test = errno;
-            }
-            if (fd_test >= 0) {
-                uint8_t init_cmd[4] = {0x01, 0x00, 0x00, 0x00};
-                nw = write(fd_test, init_cmd, 4);
-                werr = errno;
-                nr = read(fd_test, native_buf, sizeof(native_buf));
-                rerr = errno;
-            }
-            kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)backup, 0);
+        int we = 0;
+        if (fd >= 0) {
+            uint8_t init_cmd[4] = {0x01, 0x00, 0x00, 0x00};
+            nw = write(fd, init_cmd, 4);
+            we = errno;
+            close(fd);
         }
 
-        /* ЛОГИРУЕМ ТОЛЬКО ПОСЛЕ ПОЛНОГО ВОССТАНОВЛЕНИЯ КРЕДОВ */
-        klog_printf("[REAL_OPEN #%d] pid=%u authid=0x%016llx swap=%ld\n",
-                    c, (unsigned int)tpid, (unsigned long long)tauth, sr);
-        klog_printf("[REAL_OPEN #%d_RES] fd=%d errno=%d write nw=%ld errno=%d\n",
-                    c, fd_test, err_test, (long)nw, werr);
+        /* 4. Восстановление */
+        kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)swap_bkp, 0);
+        kekcall(KEKCALL_RESTORE_CAPS, 0, (uintptr_t)caps_bkp, 0);
 
-        if (fd_test >= 0 && nw > 0) {
-            klog_printf("[REAL_OPEN] *** BINGO! VICTORY! Native d_open + write SUCCESS under pid %u! ***\n", tpid);
-            if (nr > 0) {
-                klog_printf("[REAL_OPEN] read nr=%zd: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                            nr, native_buf[0], native_buf[1], native_buf[2], native_buf[3],
-                            native_buf[4], native_buf[5], native_buf[6], native_buf[7]);
-            }
-            close(fd_test);
-            return 0;
-        }
-        if (fd_test >= 0) {
-            close(fd_test);
+        klog_printf("[MAX_SWAP_OPEN #%d] pid=%u authid=0x%016llx swap=%ld fd=%d errno=%d nw=%zd werr=%d\n",
+                    c, tpid, (unsigned long long)tauth, sr, fd, e, nw, we);
+
+        if (fd >= 0) {
+            klog_printf("[MAX_SWAP_OPEN] *** BINGO! COMBO SUCCESSFUL under pid %u! ***\n", tpid);
+            break;
         }
     }
+    {
+        int bfd = open("/dev/mp4/dump_for_decid", O_RDWR);
+        int berr = errno;
+        klog_printf("[STATE_CHECK post-test2] clean: fd=%d errno=%d\n", bfd, berr);
+        if (bfd >= 0) close(bfd);
+    }
+
 
 
     /* Шаг 4: патчим все найденные mp4 cdevsw */
