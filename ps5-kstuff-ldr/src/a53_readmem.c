@@ -803,74 +803,122 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     }
 
     /* Шаг 3.1: Тест открытия /dev/mp4/dump_for_decid под кредами кандидатов (РОДНОЙ d_open БЕЗ ПАТЧА!) */
-    klog_printf("[REAL_OPEN] === Testing native open under %d candidates (SAFETY: no intermediate klog during swap) ===\n", ncandidates);
+    klog_printf("[REAL_OPEN] === Testing native open under priority candidates (SAFETY: no intermediate klog during swap) ===\n");
 
-    /* Сортировка приоритетов кандидатов */
-    const char *prio_names[] = {
-        "VideoCore",
-        "MediaCore",
-        "AvControl",
-        "AvCapture",
-        "audiod",
-        "SysCore",
-        "ShellCore"
-    };
+    /* Приоритетные PID из списка */
+    const uint32_t prio_pids[] = { 73, 77, 75, 74, 96, 94, 1 };
+    const int num_prio = sizeof(prio_pids) / sizeof(prio_pids[0]);
 
-    for (int prio_idx = 0; prio_idx < 7; prio_idx++) {
-        const char *pname = prio_names[prio_idx];
-        for (int t = 0; t < ncandidates; t++) {
-            if (!strstr(candidate_comms[t], pname)) continue;
+    for (int p_idx = 0; p_idx < num_prio; p_idx++) {
+        uint32_t tpid = prio_pids[p_idx];
+        uint64_t tauth = 0;
+        uint64_t tucred = 0;
+        char tcomm[32] = "prio_candidate";
 
-            uint32_t tpid = candidate_pids[t];
-            const char *tcomm = candidate_comms[t];
-            uint64_t tauth = candidate_authids[t];
+        /* Находим ucred и authid для этого PID из полученного буфера процессов */
+        for (long i = 0; i < total_procs && i < 128; i++) {
+            uint8_t *entry = proc_buf + i * 48;
+            uint32_t e_pid = *(uint32_t*)(entry + 0);
+            if (e_pid == tpid) {
+                memcpy(tcomm, entry + 4, 24);
+                tucred = *(uint64_t*)(entry + 28);
+                tauth = *(uint64_t*)(entry + 36);
+                break;
+            }
+        }
 
-            uint64_t backup[4] = {0};
-            int fd_test = -1;
-            int err_test = 0;
-            ssize_t nw = -1;
-            int werr = 0;
-            uint8_t native_buf[256] = {0};
-            ssize_t nr = -1;
-            int rerr = 0;
+        /* Защита: boost ucred refcount на +100 на всякий случай */
+        if (tucred && (tucred & 0xFFFF000000000000ULL) == 0xFFFF000000000000ULL) {
+            uint32_t ref = 0;
+            kekcall(KEKCALL_DUMP_MEM, tucred, (uintptr_t)&ref, 4);
+            if (ref > 0 && ref < 100000) {
+                kekcall(27 /* WRITE64 */, tucred, ref + 100, 4);
+            }
+        }
 
-            /* КРИТИЧЕСКИЙ SAFETY БЛОК: СВАП -> ВЫЗОВЫ -> РЕСТОР БЕЗ КЛОГОВ В СЕРЕДИНЕ */
-            long sr = kekcall(KEKCALL_SWAP_FULL, tpid, (uintptr_t)backup, 0);
-            if (sr == 0) {
-                fd_test = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
+        uint64_t backup[4] = {0};
+        int fd_test = -1;
+        int err_test = 0;
+        ssize_t nw = -1;
+        int werr = 0;
+        uint8_t native_buf[256] = {0};
+        ssize_t nr = -1;
+        int rerr = 0;
+
+        /* КРИТИЧЕСКИЙ SAFETY БЛОК: СВАП -> ВЫЗОВЫ -> РЕСТОР БЕЗ КЛОГОВ В СЕРЕДИНЕ */
+        long sr = kekcall(KEKCALL_SWAP_FULL, tpid, (uintptr_t)backup, 0);
+        if (sr == 0) {
+            fd_test = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
+            err_test = errno;
+            if (fd_test < 0 && err_test == 1) {
+                fd_test = open("/dev/mp4/dump_for_decid", 0x0000 /* O_RDONLY */);
                 err_test = errno;
-                if (fd_test < 0 && err_test == 1) {
-                    fd_test = open("/dev/mp4/dump_for_decid", 0x0000 /* O_RDONLY */);
-                    err_test = errno;
-                }
-                if (fd_test >= 0) {
-                    /* Сессия инициализирована родным d_open! Пробуем сразу write и read */
-                    uint8_t zero8[8] = {0};
-                    nw = write(fd_test, zero8, 8);
-                    werr = errno;
-                    nr = read(fd_test, native_buf, sizeof(native_buf));
-                    rerr = errno;
-                }
-                kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)backup, 0);
             }
-
-            /* ЛОГИРУЕМ ТОЛЬКО ПОСЛЕ ПОЛНОГО ВОССТАНОВЛЕНИЯ КРЕДОВ */
-            klog_printf("[REAL_OPEN] candidate '%s' (pid %u authid=0x%016llx) -> swap=%ld fd=%d errno=%d\n",
-                        tcomm, tpid, (unsigned long long)tauth, sr, fd_test, err_test);
-
             if (fd_test >= 0) {
-                klog_printf("[REAL_OPEN] *** BINGO! /dev/mp4/dump_for_decid OPENED NATIVELY WITH %s (pid %u)! ***\n",
-                            tcomm, tpid);
-                klog_printf("[REAL_OPEN] write nw=%zd errno=%d, read nr=%zd errno=%d\n",
-                            nw, werr, nr, rerr);
-                if (nr > 0) {
-                    klog_printf("[REAL_OPEN] +0x00: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                                native_buf[0], native_buf[1], native_buf[2], native_buf[3],
-                                native_buf[4], native_buf[5], native_buf[6], native_buf[7]);
-                }
-                close(fd_test);
-                return 0;
+                /* Сессия инициализирована родным d_open! Пробуем сразу write и read */
+                uint8_t init_cmd[4] = {0x01, 0x00, 0x00, 0x00};
+                nw = write(fd_test, init_cmd, 4);
+                werr = errno;
+                nr = read(fd_test, native_buf, sizeof(native_buf));
+                rerr = errno;
             }
+            kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)backup, 0);
+        }
+
+        /* ЛОГИРУЕМ ТОЛЬКО ПОСЛЕ ПОЛНОГО ВОССТАНОВЛЕНИЯ КРЕДОВ */
+        klog_printf("[REAL_OPEN pid=%u] '%s' (authid=0x%016llx) -> swap=%ld fd=%d errno=%d write nw=%zd errno=%d\n",
+                    tpid, tcomm, (unsigned long long)tauth, sr, fd_test, err_test, nw, werr);
+
+        if (fd_test >= 0 && nw > 0) {
+            klog_printf("[REAL_OPEN] *** BINGO! VICTORY! Native d_open + write SUCCESS under pid %u! ***\n", tpid);
+            if (nr > 0) {
+                klog_printf("[REAL_OPEN] read nr=%zd: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                            nr, native_buf[0], native_buf[1], native_buf[2], native_buf[3],
+                            native_buf[4], native_buf[5], native_buf[6], native_buf[7]);
+            }
+            close(fd_test);
+            return 0;
+        }
+        if (fd_test >= 0) {
+            close(fd_test);
+        }
+    }
+
+    /* Дополнительный проход по всем найденным кандидатам с именем процесса (если comm заработал) */
+    for (int t = 0; t < ncandidates; t++) {
+        uint32_t tpid = candidate_pids[t];
+        int already_tested = 0;
+        for (int p_idx = 0; p_idx < num_prio; p_idx++) {
+            if (prio_pids[p_idx] == tpid) { already_tested = 1; break; }
+        }
+        if (already_tested) continue;
+
+        const char *tcomm = candidate_comms[t];
+        uint64_t tauth = candidate_authids[t];
+
+        uint64_t backup[4] = {0};
+        int fd_test = -1;
+        int err_test = 0;
+        ssize_t nw = -1;
+        int werr = 0;
+
+        long sr = kekcall(KEKCALL_SWAP_FULL, tpid, (uintptr_t)backup, 0);
+        if (sr == 0) {
+            fd_test = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
+            err_test = errno;
+            if (fd_test >= 0) {
+                uint8_t init_cmd[4] = {0x01, 0x00, 0x00, 0x00};
+                nw = write(fd_test, init_cmd, 4);
+                werr = errno;
+            }
+            kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)backup, 0);
+        }
+
+        klog_printf("[REAL_OPEN candidate pid=%u] '%s' (authid=0x%016llx) -> fd=%d errno=%d nw=%zd errno=%d\n",
+                    tpid, tcomm, (unsigned long long)tauth, fd_test, err_test, nw, werr);
+        if (fd_test >= 0) {
+            close(fd_test);
+            if (nw > 0) return 0;
         }
     }
 

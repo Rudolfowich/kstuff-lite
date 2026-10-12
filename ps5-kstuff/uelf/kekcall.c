@@ -847,8 +847,18 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
             if (!pid) pid = (uint32_t)(pid_u64_b0 & 0xFFFFFFFF);
 
             char comm[24] = {0};
-            copy_from_kernel(comm, p + 0x44C, 20);
-            if (!comm[0]) copy_from_kernel(comm, p + 0x448, 20);
+            /* Ищем p_comm перебором вероятных смещений FreeBSD/Prospero (0x440..0x460) */
+            const uint64_t comm_offsets[] = { 0x450, 0x454, 0x458, 0x44C, 0x448, 0x440, 0x460 };
+            for (int co = 0; co < 7; co++) {
+                char test_comm[24] = {0};
+                copy_from_kernel(test_comm, p + comm_offsets[co], 20);
+                test_comm[20] = 0;
+                /* Проверяем, что первый символ — печатный ASCII */
+                if ((unsigned char)test_comm[0] >= 32 && (unsigned char)test_comm[0] <= 126) {
+                    memcpy(comm, test_comm, 20);
+                    break;
+                }
+            }
 
             uint64_t ucred = 0;
             kpeek64_checked(p + 0x40, &ucred);
