@@ -67,109 +67,89 @@ probe_mp4_device(void)
     static uint64_t ext_buf[192];
     for (int i = 0; i < 192; i++) ext_buf[i] = 0;
     kekcall(KEKCALL_EXT_DUMP, 0, (uintptr_t)ext_buf, sizeof(ext_buf));
+    uint64_t proc_va = ext_buf[2];
+    uint64_t ucred_va = ext_buf[3];
+    uint64_t fd_va = ext_buf[47];
+    uint64_t arena_base = proc_va & ~0xFFFFFFFFULL;
 
-    uint64_t proc_va  = ext_buf[2];
-
-    /* 1. Scan inline bytes "mp4/dump" */
-    static uint64_t g_inline[32];
-    for (int i = 0; i < 32; i++) g_inline[i] = 0;
-    uint64_t str_addr = 0;
-
-    uint64_t arena_proc = proc_va & ~0xFFFFFFFFULL;
-    uint64_t inline_starts[] = {
-        arena_proc + 0x90000000ULL,                /* точный район 0x93cd38aa */
-        0,                                         /* kdata_base */
-        proc_va - (64ULL * 1024 * 1024),
+    /* ===== APPROACH 3: Heap scan для inline cdev (как в "jackpot" boot) ===== 
+     * В одном из прошлых boot мы находили inline байты "mp4/dump" в heap
+     * (адрес 0xffff94c693cd38aa). Это была cdev struct с si_name inline.
+     * Повторяем heap scan — ищем по тому же 0x90000000 offset в arena */
+    klog_puts("[a53] APPROACH 3: heap scan for inline cdev si_name\n");
+    uint64_t heap_scan_starts[] = {
+        arena_base + 0x80000000ULL,
+        arena_base + 0x90000000ULL,
+        arena_base + 0xA0000000ULL,
     };
-
-    long n1 = 0;
-    for (int idx = 0; idx < 3; idx++) {
-        for (int i = 0; i < 32; i++) g_inline[i] = 0;
-        n1 = kekcall(KEKCALL_SCAN_DMEM, 128, (uintptr_t)g_inline, inline_starts[idx]);
-        klog_printf("[a53] inline scan #%d (0x%llx): total=%ld\n",
-                    idx, (unsigned long long)inline_starts[idx], n1);
+    for (int s = 0; s < 3; s++) {
+        static uint64_t g_heap[32];
+        for (int i = 0; i < 32; i++) g_heap[i] = 0;
+        long n = kekcall(KEKCALL_SCAN_DMEM, 256, (uintptr_t)g_heap, heap_scan_starts[s]);
+        klog_printf("[a53] heap start=0x%llx total=%ld\n", 
+                    (unsigned long long)heap_scan_starts[s], n);
         for (int i = 0; i < 32; i++) {
-            if (g_inline[i]) {
-                klog_printf("[a53]   inline[%2d] = 0x%016llx\n", i, (unsigned long long)g_inline[i]);
-                if (i == 1 || !str_addr) str_addr = g_inline[i];
-            }
+            if (g_heap[i]) klog_printf("[a53]   h[%d] = 0x%016llx\n", i, (unsigned long long)g_heap[i]);
         }
-        if (str_addr) break;
+        if (n > 0) {
+            klog_puts("[a53] FOUND heap inline — это cdev struct!\n");
+            /* Теперь dump вокруг этого адреса */
+            uint64_t cdev_name_addr = g_heap[0];  /* первая находка */
+            static uint64_t g_cdev[64];
+            for (int i = 0; i < 64; i++) g_cdev[i] = 0;
+            kekcall(KEKCALL_DUMP_MEM, cdev_name_addr, (uintptr_t)g_cdev, 0);
+            klog_printf("[a53] dump around cdev_name 0x%llx:\n", 
+                        (unsigned long long)cdev_name_addr);
+            for (int i = 0; i < 64; i++) {
+                char asc[9] = {0};
+                memcpy(asc, &g_cdev[i], 8);
+                for (int c = 0; c < 8; c++) {
+                    if ((unsigned char)asc[c] < 32 || (unsigned char)asc[c] > 126) asc[c] = '.';
+                }
+                klog_printf("[a53]   [%+4d] 0x%016llx '%s'\n", 
+                            (i - 32) * 8, (unsigned long long)g_cdev[i], asc);
+            }
+            return 0;
+        }
     }
 
+    /* ===== APPROACH 4: xref scan ВПЕРЁД от str_addr (не назад) ===== */
+    klog_puts("[a53] APPROACH 4: xref FORWARD from str_addr, 1MB chunks\n");
+    uint64_t str_addr = 0;
+    /* Find current str_addr through scan from kdata_base */
+    static uint64_t g_str[32];
+    for (int i = 0; i < 32; i++) g_str[i] = 0;
+    kekcall(KEKCALL_SCAN_DMEM, 32, (uintptr_t)g_str, 0);  /* 32 MB from kdata_base */
+    for (int i = 0; i < 32; i++) {
+        if (g_str[i] && (g_str[i] & 0xff) == 0xaa) {  /* ends with ...8aa */
+            str_addr = g_str[i];
+            break;
+        }
+    }
     if (!str_addr) {
-        klog_puts("[a53] NO inline find — abort\n");
+        klog_puts("[a53] can't find str_addr for approach 4\n");
         return -1;
     }
+    klog_printf("[a53] using str_addr=0x%llx for xref forward scan\n",
+                (unsigned long long)str_addr);
 
-    /* 2. Dump 512 байт вокруг найденной строки */
-    for (int i = 0; i < 64; i++) g_dump[i] = 0;
-    klog_printf("[a53] === dump around str_addr 0x%llx ===\n", (unsigned long long)str_addr);
-    kekcall(KEKCALL_DUMP_MEM, str_addr, (uintptr_t)g_dump, 0);
-    uint64_t base = (str_addr - 256) & ~7ULL;
-    for (int i = 0; i < 64; i++) {
-        char asc[9] = {0};
-        memcpy(asc, &g_dump[i], 8);
-        for (int c = 0; c < 8; c++) {
-            if ((unsigned char)asc[c] < 32 || (unsigned char)asc[c] > 126) asc[c] = '.';
-        }
-        klog_printf("[a53]   [%+4d] 0x%016llx '%s' @ 0x%llx\n",
-                    (i - 32) * 8, (unsigned long long)g_dump[i], asc,
-                    (unsigned long long)(base + i*8));
-    }
-
-    /* ===== APPROACH 1: Scan .data для указателя на str_addr =====
-     * cdevsw у offset 8 имеет d_name = pointer на имя драйвера.
-     * Если d_name указывает на "mp4/dump" — найдём cdevsw в .data */
-    klog_puts("[a53] approach 1: scan kdata_base .data for pointer to str_addr\n");
-    static uint64_t g_ptr_finds[32];
-    for (int i = 0; i < 32; i++) g_ptr_finds[i] = 0;
-
-    long n_ptr = kekcall(KEKCALL_SCAN_PTR, (uintptr_t)g_ptr_finds, str_addr, 8 /* MB */);
-    klog_printf("[a53] .data ptr scan: total=%ld\n", n_ptr);
-    for (int i = 0; i < 32; i++) {
-        if (g_ptr_finds[i]) {
-            klog_printf("[a53]   ptr_find[%d] = 0x%016llx\n", i, (unsigned long long)g_ptr_finds[i]);
-            /* Дампим окружение вокруг найденного указателя (cdevsw) */
-            kekcall(KEKCALL_DUMP_MEM, g_ptr_finds[i], (uintptr_t)g_dump, 0);
-            for (int d = 0; d < 16; d++) {
-                klog_printf("[a53]     cdevsw[%+3d] = 0x%016llx @ 0x%llx\n",
-                            (d - 8)*8, (unsigned long long)g_dump[d + 24],
-                            (unsigned long long)(((g_ptr_finds[i] - 256) & ~7ULL) + (d + 24)*8));
-            }
-        }
-    }
-    if (n_ptr > 0) return 0;
-
-    /* ===== APPROACH 2: xref scan маленькими chunks по 1 MB =====
-     * Разбиваем 10 MB на 10 кусков по 1 MB каждый.
-     * Между вызовами kekcall ядро возвращается в юзерленд и получает heartbeat. */
-    klog_puts("[a53] approach 2: xref scan backward, 1MB chunks\n");
-    static uint64_t g_xref[32];
-    for (int chunk = 1; chunk <= 10; chunk++) {
+    for (int chunk = 0; chunk < 20; chunk++) {
+        static uint64_t g_xref[32];
         for (int i = 0; i < 32; i++) g_xref[i] = 0;
-
-        uint64_t chunk_start = str_addr - (uint64_t)(chunk) * 1024ULL * 1024ULL;
-        long n_c = kekcall(KEKCALL_SCAN_XREF_V2,
-                           str_addr,                   /* target */
-                           (uintptr_t)g_xref,         /* buf */
-                           chunk_start);              /* start_abs */
-        klog_printf("[a53] xref chunk %d (start 0x%llx, 1MB): total=%ld\n",
-                    chunk, (unsigned long long)chunk_start, n_c);
-        for (int i = 0; i < 32; i++) {
-            if (g_xref[i]) {
-                klog_printf("[a53]   chunk%d[%d] = 0x%016llx\n", chunk, i, (unsigned long long)g_xref[i]);
-                kekcall(KEKCALL_DUMP_MEM, g_xref[i], (uintptr_t)g_dump, 0);
-                for (int d = 0; d < 16; d++) {
-                    klog_printf("[a53]     xref_code[%+3d] = 0x%016llx @ 0x%llx\n",
-                                (d - 8)*8, (unsigned long long)g_dump[d + 24],
-                                (unsigned long long)(((g_xref[i] - 256) & ~7ULL) + (d + 24)*8));
-                }
+        uint64_t chunk_start = str_addr + (uint64_t)chunk * 1024ULL * 1024ULL;
+        long n = kekcall(KEKCALL_SCAN_XREF_V2, str_addr, (uintptr_t)g_xref, chunk_start);
+        if (n > 0) {
+            klog_printf("[a53] FOUND xref! chunk %d start=0x%llx total=%ld\n",
+                        chunk, (unsigned long long)chunk_start, n);
+            for (int i = 0; i < 32; i++) {
+                if (g_xref[i]) klog_printf("[a53]   x[%d] = 0x%016llx\n", i, (unsigned long long)g_xref[i]);
             }
+            return 0;
         }
     }
 
-    return 0;
+    klog_puts("[a53] both approaches 3+4 failed\n");
+    return -1;
 }
 
 /* ---- Main install entry --------------------------------------------- */
