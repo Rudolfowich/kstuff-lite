@@ -427,6 +427,7 @@ scan_cdevsw(void)
     int total_cdevsw = 0;
     g_cdevsw_count = 0;
     uint64_t mp4_cdevsw_addr = 0;
+    (void)mp4_cdevsw_addr;
     uint64_t mp4_d_open = 0;
     (void)mp4_d_open;
 
@@ -579,6 +580,7 @@ find_and_patch_mp4_cdevsw(void)
 
     uint64_t found_cdevsw = 0;
     uint64_t found_cdev = 0;
+    (void)found_cdev;
     char found_name[64] = {0};
 
     for (int idx = 0; idx < g_cdevsw_count; idx++) {
