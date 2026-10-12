@@ -844,6 +844,7 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         uint8_t native_buf[256] = {0};
         ssize_t nr = -1;
         int rerr = 0;
+        (void)rerr;
 
         /* КРИТИЧЕСКИЙ SAFETY БЛОК: СВАП -> ВЫЗОВЫ -> РЕСТОР БЕЗ КЛОГОВ В СЕРЕДИНЕ */
         long sr = kekcall(KEKCALL_SWAP_FULL, tpid, (uintptr_t)backup, 0);
