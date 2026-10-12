@@ -138,26 +138,34 @@ find_mp4_cdevsw(void)
     uint64_t mp4_strings[16] = {0};
     unsigned n_strings = 0;
 
+    /* Всегда включаем подтвержденный адрес строки "mp4/dump" */
+    uint64_t str_mp4_dump = kbase + 0x5D38AAULL;
+    mp4_strings[n_strings++] = str_mp4_dump;
+    klog_printf("[CDEV] candidate #0 (mp4/dump): 0x%llx\n", (unsigned long long)str_mp4_dump);
+
     for (uint64_t off = 0; off < rodata_size; off += 4096) {
         uint8_t buf[4096];
         for (int i = 0; i < 4096; i++) buf[i] = 0;
         if (kekcall(KEKCALL_DUMP_MEM, rodata_start + off, (uintptr_t)buf, 4096) != 0)
             continue;
 
-        for (int i = 1; i + 4 < 4096; i++) {
-            /* "mp4\0" с null перед */
-            if (buf[i-1] == 0x00 &&
-                buf[i]   == 0x6D && buf[i+1] == 0x70 &&
-                buf[i+2] == 0x34 && buf[i+3] == 0x00)
-            {
+        for (int i = 0; i + 4 < 4096; i++) {
+            /* Любая "mp4\0" (без жесткого требования к предшествующему нулю) */
+            if (buf[i] == 'm' && buf[i+1] == 'p' && buf[i+2] == '4' && buf[i+3] == '\0') {
                 uint64_t addr = rodata_start + off + i;
-                klog_printf("[CDEV] 'mp4' @ 0x%llx\n", (unsigned long long)addr);
+                klog_printf("[CDEV] 'mp4\\0' @ 0x%llx\n", (unsigned long long)addr);
+                if (n_strings < 16) mp4_strings[n_strings++] = addr;
+            }
+            /* Также проверим "a53\0" */
+            else if (buf[i] == 'a' && buf[i+1] == '5' && buf[i+2] == '3' && buf[i+3] == '\0') {
+                uint64_t addr = rodata_start + off + i;
+                klog_printf("[CDEV] 'a53\\0' @ 0x%llx\n", (unsigned long long)addr);
                 if (n_strings < 16) mp4_strings[n_strings++] = addr;
             }
         }
     }
 
-    klog_printf("[CDEV] found %u 'mp4' strings in .rodata\n", n_strings);
+    klog_printf("[CDEV] total %u target strings to check in .data\n", n_strings);
 
     /* Шаг 2: для каждой найденной строки — scan .data */
     for (unsigned k = 0; k < n_strings; k++) {
