@@ -115,10 +115,9 @@ probe_mp4_device(void)
     /* ===== APPROACH 6: ptr scan .data НАЗАД от kdata_base 32 MB =====
      * На случай если .data размещена ПЕРЕД kdata_base */
     klog_puts("[a53] APPROACH 6: ptr scan .data BACKWARD 32MB\n");
-    extern char kdata_base[];
-    uint64_t kbase_back = (uint64_t)kdata_base - (32ULL * 1024 * 1024);
+    int64_t offset_back = -(32LL * 1024 * 1024);
     for (int i = 0; i < 32; i++) g_p[i] = 0;
-    long np_back = kekcall5(KEKCALL_SCAN_PTR_CUSTOM, (uintptr_t)g_p, str_addr, 32, kbase_back);
+    long np_back = kekcall5(KEKCALL_SCAN_PTR_CUSTOM, (uintptr_t)g_p, str_addr, 32, (uint64_t)offset_back);
     klog_printf("[a53] ptr scan 32MB backward: total=%ld\n", np_back);
     for (int i = 0; i < 32; i++) {
         if (g_p[i]) klog_printf("[a53]   ptr_back[%d] = 0x%016llx\n", i, (unsigned long long)g_p[i]);

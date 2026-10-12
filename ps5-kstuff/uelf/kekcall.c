@@ -616,20 +616,25 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
     }
     else if(nr == 23)
     {
-        /* SCAN_PTR_CUSTOM: scan memory for 8-byte pointer value from custom base.
+        /* SCAN_PTR_CUSTOM: scan memory for 8-byte pointer value.
          * args[RDI] = user_buf (uint64_t[32])
          * args[RSI] = needle (8-byte pointer value)
          * args[RDX] = scan_mb (default 8)
-         * args[R8]  = start_abs (0 = kdata_base) */
+         * args[R8]  = start_or_offset (if > 0xfffffc0000000000ULL: absolute, else: kdata_base + (int64_t)offset) */
         uint64_t user_buf = args[RDI];
         uint64_t needle = args[RSI];
         uint64_t scan_mb = args[RDX];
-        uint64_t start_abs = args[R8];
+        uint64_t start_param = args[R8];
         if (!user_buf || !needle) return 1;
         if (scan_mb == 0 || scan_mb > 128) scan_mb = 8;
 
         extern char kdata_base[];
-        uint64_t kbase = start_abs ? start_abs : (uint64_t)kdata_base;
+        uint64_t kbase;
+        if (start_param > 0xfffffc0000000000ULL) {
+            kbase = start_param;
+        } else {
+            kbase = (uint64_t)kdata_base + (int64_t)start_param;
+        }
         uint64_t scan_bytes = scan_mb * 1024ULL * 1024ULL;
 
         uint64_t finds[32] = {0};
