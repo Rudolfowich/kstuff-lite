@@ -623,6 +623,7 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     int total_cdev_nodes = 0;
     uint64_t null_parent_csw = 0;
     uint64_t mp4_parent_csws[8] = {0};
+    uint64_t mp4_cdev_nodes[8] = {0};
     char     mp4_names[8][64] = {{0}};
     int      mp4_count = 0;
 
@@ -707,6 +708,7 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                     }
                     if (!found_dup && mp4_count < 8) {
                         mp4_parent_csws[mp4_count] = csw;
+                        mp4_cdev_nodes[mp4_count] = cur_cdev;
                         strncpy(mp4_names[mp4_count], dev_name, 63);
                         mp4_count++;
                     }
@@ -850,16 +852,77 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     klog_printf("[DBG] null_dopen=0x%llx orig_dopen_calc=0x%llx\n",
                 (unsigned long long)null_dopen, (unsigned long long)orig_dopen_calc);
 
+    uint64_t dedicated_mp4_csw = 0;
+    uint64_t dedicated_mp4_cdev = 0;
+
     for (int m = 0; m < mp4_count; m++) {
         uint64_t csw = mp4_parent_csws[m];
         if (!csw) continue;
         if (strstr(mp4_names[m], "dump_for_decid")) {
+            dedicated_mp4_csw = csw;
+            dedicated_mp4_cdev = mp4_cdev_nodes[m];
             long wr = kekcall(27 /* WRITE64 */, csw + 0x10ULL, orig_dopen_calc, 0);
             uint64_t rb = 0;
             kekcall(KEKCALL_DUMP_MEM, csw + 0x10ULL, (uintptr_t)&rb, 8);
             klog_printf("[VERIFY] csw+0x10 after unpatch: 0x%llx (expected 0x%llx) %s (ret=%ld)\n",
                         (unsigned long long)rb, (unsigned long long)orig_dopen_calc,
                         (rb == orig_dopen_calc) ? "OK" : "MISMATCH", wr);
+        }
+    }
+
+    /* ТЕСТ ПЕРВЫЙ: Верификация работы SWAP_FULL */
+    klog_printf("[TEST1] === Verifying KEKCALL_SWAP_FULL credential switching ===\n");
+    uint64_t my_td = 0;
+    uint64_t ext_check[4] = {0};
+    kekcall(KEKCALL_EXT_DUMP, 0, (uint64_t)ext_check, sizeof(ext_check));
+    my_td = ext_check[1];  /* curthread VA */
+
+    uint64_t ucred_before = 0, ucred_after = 0;
+    kekcall(KEKCALL_DUMP_MEM, my_td + 0x140ULL, (uintptr_t)&ucred_before, 8);
+    uint64_t init_target_ucred = g_cand_ucreds[0]; /* pid=1 ucred */
+    
+    uint64_t swap_bkp[4] = {0};
+    long swap_ret = kekcall(KEKCALL_SWAP_FULL, 1ULL, (uintptr_t)swap_bkp, 0);
+    kekcall(KEKCALL_DUMP_MEM, my_td + 0x140ULL, (uintptr_t)&ucred_after, 8);
+    kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)swap_bkp, 0);
+
+    klog_printf("[SWAP_VERIFY] ret=%ld before=0x%llx after=0x%llx target=0x%llx %s\n",
+                swap_ret, (unsigned long long)ucred_before, (unsigned long long)ucred_after,
+                (unsigned long long)init_target_ucred,
+                (ucred_after == init_target_ucred) ? "CONFIRMED_WORKING" : "SWAP_FAILED");
+
+    /* ТЕСТ ВТОРОЙ: Dump cdevsw mp4/dump_for_decid */
+    if (dedicated_mp4_csw) {
+        klog_printf("[TEST2] === Full cdevsw dump for mp4/dump_for_decid @ 0x%llx ===\n",
+                    (unsigned long long)dedicated_mp4_csw);
+        uint64_t fns[16] = {0};
+        kekcall(KEKCALL_DUMP_MEM, dedicated_mp4_csw, (uintptr_t)fns, sizeof(fns));
+        klog_printf("[MP4_CSW] +0x00: ver/flags = 0x%016llx\n", (unsigned long long)fns[0]);
+        klog_printf("[MP4_CSW] +0x08: d_name   = 0x%016llx\n", (unsigned long long)fns[1]);
+        klog_printf("[MP4_CSW] +0x10: d_open   = 0x%016llx\n", (unsigned long long)fns[2]);
+        klog_printf("[MP4_CSW] +0x18: d_fdopen = 0x%016llx\n", (unsigned long long)fns[3]);
+        klog_printf("[MP4_CSW] +0x20: d_close  = 0x%016llx\n", (unsigned long long)fns[4]);
+        klog_printf("[MP4_CSW] +0x28: d_read   = 0x%016llx\n", (unsigned long long)fns[5]);
+        klog_printf("[MP4_CSW] +0x30: d_write  = 0x%016llx\n", (unsigned long long)fns[6]);
+        klog_printf("[MP4_CSW] +0x38: d_ioctl  = 0x%016llx\n", (unsigned long long)fns[7]);
+        klog_printf("[MP4_CSW] +0x40: d_poll   = 0x%016llx\n", (unsigned long long)fns[8]);
+        klog_printf("[MP4_CSW] +0x48: d_mmap   = 0x%016llx\n", (unsigned long long)fns[9]);
+        klog_printf("[MP4_CSW] +0x50: d_strat  = 0x%016llx\n", (unsigned long long)fns[10]);
+        klog_printf("[MP4_CSW] +0x58: d_dump   = 0x%016llx\n", (unsigned long long)fns[11]);
+    }
+
+    /* ТЕСТ ТРЕТИЙ: Dump cdev struct для /dev/mp4/dump_for_decid */
+    if (dedicated_mp4_cdev) {
+        klog_printf("[TEST3] === Hex dump of struct cdev @ 0x%llx (512 bytes) ===\n",
+                    (unsigned long long)dedicated_mp4_cdev);
+        uint8_t cdev_buf[512] = {0};
+        kekcall(KEKCALL_DUMP_MEM, dedicated_mp4_cdev, (uintptr_t)cdev_buf, 512);
+        for (int i = 0; i < 512; i += 16) {
+            klog_printf("[CDEV] +0x%03x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                        i, cdev_buf[i], cdev_buf[i+1], cdev_buf[i+2], cdev_buf[i+3],
+                        cdev_buf[i+4], cdev_buf[i+5], cdev_buf[i+6], cdev_buf[i+7],
+                        cdev_buf[i+8], cdev_buf[i+9], cdev_buf[i+10], cdev_buf[i+11],
+                        cdev_buf[i+12], cdev_buf[i+13], cdev_buf[i+14], cdev_buf[i+15]);
         }
     }
 
