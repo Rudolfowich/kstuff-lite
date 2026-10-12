@@ -662,6 +662,13 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = total;
         return 0;
     }
+    else if(nr == 24)
+    {
+        /* GET_KBASE: return kdata_base address to caller */
+        extern char kdata_base[];
+        args[RAX] = (uint64_t)kdata_base;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;

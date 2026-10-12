@@ -123,7 +123,10 @@ step_rodata_hunt(void)
 int
 probe_mp4_device(void)
 {
-    step_rodata_hunt();
+    uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+    klog_printf("[KBASE] kernel_base (kdata_base) = 0x%llx\n", (unsigned long long)kbase);
+    klog_printf("[KBASE] copyin would be at 0x%llx\n", (unsigned long long)(kbase + (-0xA66D80LL)));
+    klog_printf("[KBASE] malloc would be at 0x%llx\n", (unsigned long long)(kbase + (-0xB74B0LL)));
     return 0;
 }
 
