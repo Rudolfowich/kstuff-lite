@@ -286,21 +286,23 @@ walk_find_mp4_cdevsw(uint64_t curproc_hint)
     int proc_cnt = 0;
     for (int cnt = 0; cnt < 300 && curr_proc; cnt++) {
         proc_cnt++;
-        uint32_t pid = 0;
+        uint64_t pid_u64 = 0;
         char comm[32] = {0};
         uint64_t p_fd = 0;
 
-        kekcall(KEKCALL_DUMP_MEM, curr_proc + 0xBC, (uintptr_t)&pid, 4);
+        kekcall(KEKCALL_DUMP_MEM, curr_proc + 0xBC, (uintptr_t)&pid_u64, 8);
         kekcall(KEKCALL_DUMP_MEM, curr_proc + 0x448, (uintptr_t)comm, 32);
         kekcall(KEKCALL_DUMP_MEM, curr_proc + 0x48, (uintptr_t)&p_fd, 8);
         comm[31] = 0;
+        uint32_t pid = (uint32_t)(pid_u64 & 0xFFFFFFFF);
 
-        uint32_t fd_nfiles = 0;
+        uint64_t fd_nfiles_u64 = 0;
         uint64_t fd_ofiles = 0;
         if (p_fd) {
             kekcall(KEKCALL_DUMP_MEM, p_fd + 0x08, (uintptr_t)&fd_ofiles, 8);
-            kekcall(KEKCALL_DUMP_MEM, p_fd + 0x10, (uintptr_t)&fd_nfiles, 4);
+            kekcall(KEKCALL_DUMP_MEM, p_fd + 0x10, (uintptr_t)&fd_nfiles_u64, 8);
         }
+        uint32_t fd_nfiles = (uint32_t)(fd_nfiles_u64 & 0xFFFFFFFF);
 
         if (printed < 10) {
             klog_printf("[WALK] #%d proc=0x%llx pid=%u comm='%s' p_fd=0x%llx nfiles=%u\n",
