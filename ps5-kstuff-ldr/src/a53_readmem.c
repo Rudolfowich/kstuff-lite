@@ -28,6 +28,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
+#include <signal.h>
+#include <setjmp.h>
 
 #include <ps5/klog.h>
 
@@ -380,98 +382,117 @@ walk_find_mp4_cdevsw(uint64_t curproc_hint)
     return 0;
 }
 
+static sigjmp_buf g_sigsys_jmp;
+static volatile int g_sigsys_fault = 0;
+
+static void
+sigsys_handler(int sig)
+{
+    (void)sig;
+    g_sigsys_fault = 1;
+    siglongjmp(g_sigsys_jmp, 1);
+}
+
 int
 scan_cdevsw(void)
 {
     uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+
+    /* Быстрая проверка: что лежит по адресу 0x5D38AA */
+    char s_check[16] = {0};
+    uint64_t s_words[2] = {0};
+    kekcall(KEKCALL_DUMP_MEM, kbase + 0x5D38AAULL, (uintptr_t)s_words, 16);
+    memcpy(s_check, s_words, 15);
+    s_check[15] = 0;
+    klog_printf("[CHECK] bytes at kbase+0x5D38AA: '%s'\n", s_check);
+
+    /* Устанавливаем обработчик SIGSYS с SA_NODEFER для безопасного обхода unmapped страниц */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sigsys_handler;
+    sa.sa_flags = SA_NODEFER;
+    sigaction(SIGSYS, &sa, NULL);
+
     uint64_t data_start = kbase + 0xD9D000ULL;
-    uint64_t str_mp4_dump = kbase + 0x5D38AAULL;
+    uint64_t data_end   = data_start + 24ULL * 1024 * 1024; /* 24 MB */
+    uint32_t D_VER9 = 0x17122009;
+    uint32_t D_VER5 = 0x20011966;
 
-    klog_printf("[CDVS] searching .data for pointer to 'mp4/dump' (0x%llx) via KEKCALL_SCAN_PTR_CUSTOM (23)\n",
-                (unsigned long long)str_mp4_dump);
+    klog_printf("[CDVS] safe scan .data 0x%llx..0x%llx with SIGSYS handler\n",
+                (unsigned long long)data_start, (unsigned long long)data_end);
 
-    uint64_t ptr_locations[16] = {0};
-    int total_found = 0;
+    int total_cdevsw = 0;
+    uint64_t mp4_cdevsw_addr = 0;
+    uint64_t mp4_d_open = 0;
 
-    /* Сканируем 16 МБ секции .data кусками по 1 МБ */
-    for (int chunk = 0; chunk < 16; chunk++) {
-        uint64_t chunk_start = data_start + chunk * 1024ULL * 1024ULL;
-        uint64_t finds[16] = {0};
-        for (int i = 0; i < 16; i++) finds[i] = 0;
+    for (uint64_t va = data_start; va < data_end; va += 4096) {
+        uint64_t buf64[512] = {0}; /* 4096 байт, выровнено на 8 */
+        g_sigsys_fault = 0;
 
-        long n = kekcall5(KEKCALL_SCAN_PTR_CUSTOM, (uintptr_t)finds, str_mp4_dump, 1, chunk_start);
-        if (n > 0) {
-            klog_printf("[CDVS] chunk %d @ 0x%llx: found %ld ptrs\n", chunk, (unsigned long long)chunk_start, n);
-            for (int i = 0; i < 16 && total_found < 16; i++) {
-                if (finds[i]) {
-                    ptr_locations[total_found++] = finds[i];
-                    klog_printf("[CDVS] match #%d: pointer at P = 0x%llx\n", total_found - 1, (unsigned long long)finds[i]);
-                }
+        if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
+            kekcall(KEKCALL_DUMP_MEM, va, (uintptr_t)buf64, 4096);
+        } else {
+            /* Попали на unmapped страницу — перехвачено SIGSYS, идём дальше */
+            continue;
+        }
+        if (g_sigsys_fault) continue;
+
+        uint8_t *buf = (uint8_t *)buf64;
+
+        for (int i = 0; i + 32 <= 4096; i += 8) {
+            uint32_t ver = 0;
+            __builtin_memcpy(&ver, buf + i, 4);
+            if (ver != D_VER9 && ver != D_VER5)
+                continue;
+
+            uint64_t cdevsw_addr = va + i;
+            uint64_t d_name_ptr = 0;
+            uint64_t d_open = 0;
+            __builtin_memcpy(&d_name_ptr, buf + i + 8, 8);
+            __builtin_memcpy(&d_open, buf + i + 0x10, 8);
+
+            if (!d_name_ptr || (d_name_ptr & 0xFFFF000000000000ULL) != 0xFFFF000000000000ULL)
+                continue;
+
+            /* Безопасно читаем d_name */
+            char name[32] = {0};
+            uint64_t name_words[4] = {0};
+            g_sigsys_fault = 0;
+
+            if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
+                kekcall(KEKCALL_DUMP_MEM, d_name_ptr, (uintptr_t)name_words, 32);
+                memcpy(name, name_words, 31);
+                name[31] = 0;
+            } else {
+                continue;
+            }
+            if (g_sigsys_fault) continue;
+            if (name[0] < 32 || name[0] > 126) continue;
+
+            total_cdevsw++;
+            klog_printf("[CDVS] #%d @ 0x%llx ver=0x%08x name='%s' d_open=0x%llx\n",
+                        total_cdevsw, (unsigned long long)cdevsw_addr, ver, name,
+                        (unsigned long long)d_open);
+
+            if (name[0] == 'm' && name[1] == 'p' && name[2] == '4') {
+                klog_printf("[CDVS] ****************************************************\n");
+                klog_printf("[CDVS] *** FOUND mp4 cdevsw! @ 0x%llx d_open=0x%llx ***\n",
+                            (unsigned long long)cdevsw_addr, (unsigned long long)d_open);
+                klog_printf("[CDVS] ****************************************************\n");
+                mp4_cdevsw_addr = cdevsw_addr;
+                mp4_d_open = d_open;
             }
         }
     }
 
-    klog_printf("[CDVS] total pointer matches found: %d\n", total_found);
+    klog_printf("[CDVS] safe scan completed. Found %d cdevsw total.\n", total_cdevsw);
 
-    for (int k = 0; k < total_found; k++) {
-        uint64_t P = ptr_locations[k];
-        klog_printf("[CDVS] ===== Analyzing candidate #%d at P = 0x%llx =====\n", k, (unsigned long long)P);
+    /* Восстанавливаем дефолтный обработчик SIGSYS */
+    signal(SIGSYS, SIG_DFL);
 
-        /* Снимаем 128 байт вокруг P: [P - 0x40 .. P + 0x40] через KEKCALL_DUMP_MEM */
-        uint64_t dump_base = (P - 0x40) & ~7ULL;
-        uint64_t raw_words[16] = {0}; /* 128 байт, выровнено на 8 */
-        if (kekcall(KEKCALL_DUMP_MEM, dump_base, (uintptr_t)raw_words, 128) == 0) {
-            uint8_t *b = (uint8_t *)raw_words;
-            klog_printf("[CDVS] Hex dump [0x%llx .. 0x%llx]:\n",
-                        (unsigned long long)dump_base, (unsigned long long)(dump_base + 128));
-            for (int row = 0; row < 128; row += 16) {
-                klog_printf("[CDVS]   +0x%02x (0x%llx): %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                            row, (unsigned long long)(dump_base + row),
-                            b[row], b[row+1], b[row+2], b[row+3], b[row+4], b[row+5], b[row+6], b[row+7],
-                            b[row+8], b[row+9], b[row+10], b[row+11], b[row+12], b[row+13], b[row+14], b[row+15]);
-            }
-        }
-
-        /* Проверяем Вариант A: P - 0x08 = D_VERSION (0x17122009 или 0x20011966) -> это struct cdevsw */
-        uint64_t word_before = 0;
-        kekcall(KEKCALL_DUMP_MEM, P - 0x08, (uintptr_t)&word_before, 8);
-        uint32_t ver = (uint32_t)(word_before & 0xFFFFFFFF);
-        klog_printf("[CDVS] P - 0x08 value = 0x%llx (ver low32 = 0x%08x)\n",
-                    (unsigned long long)word_before, ver);
-
-        if (ver == 0x17122009 || ver == 0x20011966) {
-            uint64_t cdevsw_addr = P - 0x08;
-            uint64_t d_open_addr = cdevsw_addr + 0x10;
-            uint64_t cur_d_open = 0;
-            kekcall(KEKCALL_DUMP_MEM, d_open_addr, (uintptr_t)&cur_d_open, 8);
-
-            klog_printf("[CDVS] *** CONFIRMED struct cdevsw @ 0x%llx! ver=0x%08x d_open=0x%llx ***\n",
-                        (unsigned long long)cdevsw_addr, ver, (unsigned long long)cur_d_open);
-        } else {
-            /* Проверяем Вариант B: это struct cdev (si_name). Ищем si_devsw */
-            klog_printf("[CDVS] P is not cdevsw.d_name (ver != D_VERSION). Checking as struct cdev (si_name)...\n");
-            /* В struct cdev указатель si_devsw лежит на смещении si_name + 0x18 или рядом */
-            for (int off = -0x20; off <= 0x30; off += 8) {
-                if (off == 0) continue;
-                uint64_t candidate_ptr = 0;
-                kekcall(KEKCALL_DUMP_MEM, P + off, (uintptr_t)&candidate_ptr, 8);
-                if ((candidate_ptr & 0xFFFF000000000000ULL) == 0xFFFF000000000000ULL) {
-                    /* Проверяем, указывает ли candidate_ptr на структуру с D_VERSION */
-                    uint64_t cand_ver_qword = 0;
-                    if (kekcall(KEKCALL_DUMP_MEM, candidate_ptr, (uintptr_t)&cand_ver_qword, 8) == 0) {
-                        uint32_t cver = (uint32_t)(cand_ver_qword & 0xFFFFFFFF);
-                        if (cver == 0x17122009 || cver == 0x20011966) {
-                            uint64_t target_d_open = 0;
-                            kekcall(KEKCALL_DUMP_MEM, candidate_ptr + 0x10, (uintptr_t)&target_d_open, 8);
-                            klog_printf("[CDVS] *** FOUND cdev.si_devsw! @ P%+d (0x%llx) -> cdevsw=0x%llx (ver=0x%08x, d_open=0x%llx) ***\n",
-                                        off, (unsigned long long)(P + off),
-                                        (unsigned long long)candidate_ptr, cver,
-                                        (unsigned long long)target_d_open);
-                        }
-                    }
-                }
-            }
-        }
+    if (mp4_cdevsw_addr) {
+        klog_printf("[CDVS] mp4 target confirmed at 0x%llx. Ready for d_open patch!\n",
+                    (unsigned long long)mp4_cdevsw_addr);
     }
 
     return 0;
