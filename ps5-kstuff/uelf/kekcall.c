@@ -552,7 +552,7 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         uint64_t needle = args[RSI];
         uint64_t scan_mb = args[RDX];
         if (!user_buf || !needle) return 1;
-        if (scan_mb == 0 || scan_mb > 32) scan_mb = 8;
+        if (scan_mb == 0 || scan_mb > 128) scan_mb = 8;
 
         extern char kdata_base[];
         uint64_t kbase = (uint64_t)kdata_base;
