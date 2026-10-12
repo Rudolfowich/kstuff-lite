@@ -472,14 +472,9 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
             }
         }
 
-        /* ВАЖНО: используем copyout напрямую — safer для userland dest */
-        extern char copyout[];
-        typedef int (*copyout_fn_t)(const void *, void *, size_t);
-        if (((copyout_fn_t)copyout)(finds, (void*)user_buf, sizeof(finds)) != 0) {
-            /* fallback если copyout недоступен */
-            if (copy_to_kernel(user_buf, finds, sizeof(finds)) != 0)
-                return EFAULT;
-        }
+        /* Проверенный путь из kekcall 8/11 — без copyout */
+        if (copy_to_kernel(user_buf, finds, sizeof(finds)) != 0)
+            return EFAULT;
 
         args[RAX] = total;
         return 0;
