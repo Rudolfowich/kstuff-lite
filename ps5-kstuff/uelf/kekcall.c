@@ -444,7 +444,7 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         if (scan_mb == 0 || scan_mb > 256) scan_mb = 32;
 
         extern char kdata_base[];
-        uint64_t kbase = start_abs ? start_abs : (uint64_t)kdata_base;
+        uint64_t kbase = (start_abs > 0xfffffc0000000000ULL) ? start_abs : ((uint64_t)kdata_base + start_abs);
         uint64_t scan_bytes = scan_mb * 1024ULL * 1024ULL;
 
         /* Pattern: "mp4/dump" little-endian u64 */
