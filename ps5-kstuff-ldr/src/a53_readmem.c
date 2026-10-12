@@ -21,6 +21,8 @@
  */
 
 #include <sys/types.h>
+#include <sys/stat.h>
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -724,11 +726,25 @@ find_and_patch_mp4_cdevsw(void)
                 close(pfd);
             }
 
-            /* Тест 2: проверка директории /dev/mp4 */
-            int dfd = open("/dev/mp4", 0x0000 /* O_RDONLY */);
-            int derr = errno;
-            klog_printf("[TEST_VFS] open('/dev/mp4'): fd=%d errno=%d\n", dfd, derr);
-            if (dfd >= 0) close(dfd);
+            /* Тест 1.1: stat на /dev/mp4/dump_for_decid */
+            struct stat st;
+            memset(&st, 0, sizeof(st));
+            int sres = stat("/dev/mp4/dump_for_decid", &st);
+            int serr = errno;
+            klog_printf("[TEST_VFS] stat('/dev/mp4/dump_for_decid'): res=%d errno=%d mode=0%o ino=%lu\n",
+                        sres, serr, (unsigned int)st.st_mode, (unsigned long)st.st_ino);
+
+            /* Тест 2: перечисление содержимого /dev/mp4 через opendir/readdir */
+            DIR *dir = opendir("/dev/mp4");
+            if (dir) {
+                struct dirent *de;
+                while ((de = readdir(dir)) != NULL) {
+                    klog_printf("[DEV_MP4] entry: '%s' type=%d\n", de->d_name, (int)de->d_type);
+                }
+                closedir(dir);
+            } else {
+                klog_printf("[DEV_MP4] opendir('/dev/mp4') failed: errno=%d\n", errno);
+            }
 
             /* Тест 3: проверка DECI-нод из walk (#50, #51, #52) */
             const char *deci_nodes[] = {
