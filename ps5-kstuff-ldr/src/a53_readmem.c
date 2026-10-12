@@ -577,94 +577,40 @@ probe_opened_mp4_fd(int fd, const char *name)
 {
     klog_printf("[PROBE] === Starting deep probe on %s (fd=%d) ===\n", name, fd);
 
-    /* Шаг 0: 'нулевой запрос' write(fd, zeros, 8) и read(fd, buf, 256) для активации */
-    uint8_t zero8[8] = {0};
-    errno = 0;
-    ssize_t nw = write(fd, zero8, 8);
-    int werr = errno;
-    klog_printf("[DECI_PROBE] write(%s, 8 zeros): nw=%ld errno=%d\n", name, (long)nw, werr);
+    /* Чистый изолированный тест: первый же write на абсолютно свежем fd */
+    if (strstr(name, "deci_mp4_ioc")) {
+        /* cmd = 22 на свежем fd */
+        uint8_t req22[8] = {0};
+        *(uint32_t*)req22 = 0x44454349; /* 'DECI' */
+        *(uint32_t*)(req22 + 4) = 22;
+        ssize_t nw22 = write(fd, req22, 8);
+        uint8_t resp22[512] = {0};
+        ssize_t nr22 = read(fd, resp22, sizeof(resp22));
+        uint32_t st22 = *(uint32_t*)resp22;
+        uint32_t len22 = *(uint32_t*)(resp22 + 4);
+        klog_printf("[FIRST_CMD22] nw=%zd nr=%zd status=0x%08x len=0x%08x\n",
+                    nw22, nr22, st22, len22);
 
-    uint8_t init_buf[512] = {0};
-    errno = 0;
-    ssize_t nr0 = read(fd, init_buf, sizeof(init_buf));
-    int rerr0 = errno;
-    klog_printf("[DECI_PROBE] post-write read(%s): nr=%ld errno=%d\n", name, (long)nr0, rerr0);
-    if (nr0 > 0) {
-        klog_printf("[DECI_FULL] === FULL %ld BYTES RESPONSE DUMP FOR %s ===\n", (long)nr0, name);
-        for (int r = 0; r < nr0; r += 16) {
-            klog_printf("[DECI_FULL] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                        r,
-                        init_buf[r+0], init_buf[r+1], init_buf[r+2], init_buf[r+3],
-                        init_buf[r+4], init_buf[r+5], init_buf[r+6], init_buf[r+7],
-                        init_buf[r+8], init_buf[r+9], init_buf[r+10], init_buf[r+11],
-                        init_buf[r+12], init_buf[r+13], init_buf[r+14], init_buf[r+15]);
+        /* Свежий fd для cmd = 23 */
+        int fd23 = open(name, 0x0002 /* O_RDWR */);
+        if (fd23 >= 0) {
+            uint8_t req23[8] = {0};
+            *(uint32_t*)req23 = 0x44454349; /* 'DECI' */
+            *(uint32_t*)(req23 + 4) = 23;
+            ssize_t nw23 = write(fd23, req23, 8);
+            uint8_t resp23[512] = {0};
+            ssize_t nr23 = read(fd23, resp23, sizeof(resp23));
+            uint32_t st23 = *(uint32_t*)resp23;
+            uint32_t len23 = *(uint32_t*)(resp23 + 4);
+            klog_printf("[FIRST_CMD23] nw=%zd nr=%zd status=0x%08x len=0x%08x\n",
+                        nw23, nr23, st23, len23);
+            close(fd23);
         }
-    }
-
-    /* 1. Целевой полный дамп для реальных команд: cmd=22 и cmd=23 */
-    const uint32_t target_cmds[] = {22, 23};
-    for (int ci = 0; ci < 2; ci++) {
-        uint32_t cmd = target_cmds[ci];
-        uint8_t req[16] = {0};
-        *(uint32_t*)req = 0x44454349; /* 'DECI' */
-        *(uint32_t*)(req + 4) = cmd;
-        ssize_t nw = write(fd, req, 8);
-
-        uint8_t resp[512] = {0};
-        ssize_t nr = read(fd, resp, sizeof(resp));
-        uint32_t status = *(uint32_t*)resp;
-        uint32_t rlen = *(uint32_t*)(resp + 4);
-        klog_printf("[CMD%u_TARGET] %s: write nw=%zd read nr=%zd status=0x%08x len=0x%08x\n",
-                    cmd, name, nw, nr, status, rlen);
-
-        if (nr > 0) {
-            klog_printf("[CMD%u_FULL] === FULL %zd BYTES DUMP FOR CMD %u on %s ===\n", cmd, nr, cmd, name);
-            for (ssize_t off = 0; off < nr; off += 16) {
-                klog_printf("[CMD%u_FULL] +0x%03zx: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                            cmd, off,
-                            resp[off+0], resp[off+1], resp[off+2], resp[off+3],
-                            resp[off+4], resp[off+5], resp[off+6], resp[off+7],
-                            resp[off+8], resp[off+9], resp[off+10], resp[off+11],
-                            resp[off+12], resp[off+13], resp[off+14], resp[off+15]);
-            }
-        }
-    }
-
-    /* 2. Тест cmd=22 и cmd=23 с разными размерами payload и content_id */
-    const size_t test_sizes[] = {4, 8, 12, 16, 24, 32, 48, 64};
-    for (int ci = 0; ci < 2; ci++) {
-        uint32_t cmd = target_cmds[ci];
-        for (int si = 0; si < 8; si++) {
-            size_t sz = test_sizes[si];
-            uint8_t req[64] = {0};
-            *(uint32_t*)req = 0x44454349; /* 'DECI' */
-            *(uint32_t*)(req + 4) = cmd;
-            if (sz > 8) {
-                memcpy(req + 8, "PPSA07286\0\0\0\0\0\0\0", 16);
-            }
-            write(fd, req, sz);
-            uint8_t resp[512] = {0};
-            ssize_t nr = read(fd, resp, sizeof(resp));
-            uint32_t status = *(uint32_t*)resp;
-            uint32_t rlen = *(uint32_t*)(resp + 4);
-            klog_printf("[CMD%u_SZ%zu] %s: status=0x%08x len=0x%08x nr=%zd\n",
-                        cmd, sz, name, status, rlen, nr);
-        }
-    }
-
-    /* 3. Тест cmd=22 и 23 БЕЗ 'DECI' prefix (raw uint32 cmd + payload) */
-    for (int ci = 0; ci < 2; ci++) {
-        uint32_t cmd = target_cmds[ci];
-        uint8_t req[32] = {0};
-        *(uint32_t*)req = cmd;
-        memcpy(req + 4, "PPSA07286\0\0\0\0\0\0\0", 16);
-        write(fd, req, 20);
-        uint8_t resp[512] = {0};
-        ssize_t nr = read(fd, resp, sizeof(resp));
-        uint32_t status = *(uint32_t*)resp;
-        uint32_t rlen = *(uint32_t*)(resp + 4);
-        klog_printf("[RAW_CMD%u] %s: status=0x%08x len=0x%08x nr=%zd\n",
-                    cmd, name, status, rlen, nr);
+    } else {
+        /* Для остальных нод — обычный короткий read check */
+        uint8_t dummy[64] = {0};
+        ssize_t nr = read(fd, dummy, sizeof(dummy));
+        klog_printf("[NODE_CHECK] %s: read nr=%zd status=0x%08x\n", name, nr, *(uint32_t*)dummy);
     }
 }
 
