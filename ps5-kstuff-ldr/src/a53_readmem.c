@@ -873,8 +873,17 @@ find_and_patch_mp4_cdevsw(void)
 
     /* Шаг 3: Чтение .text (mp4_cdev_open) ЧЕРЕЗ KEKCALL_DUMP_PHYS (обход XOM!) */
     unsigned long dmap_base = 0;
-    unsigned long cr3 = kernel_get_proc_cr3(-1, &dmap_base);
-    klog_printf("[DUMP_PHYS] cr3=0x%lx dmap_base=0x%lx\n", cr3, dmap_base);
+    int my_pid = getpid();
+    unsigned long cr3 = kernel_get_proc_cr3(my_pid, &dmap_base);
+    if (!cr3) {
+        klog_printf("[DUMP_PHYS] getpid()=%d failed, falling back to pid=1 (init)\n", my_pid);
+        cr3 = kernel_get_proc_cr3(1, &dmap_base);
+    }
+    if (!cr3) {
+        klog_printf("[DUMP_PHYS] pid=1 failed, falling back to pid=-1\n", my_pid);
+        cr3 = kernel_get_proc_cr3(-1, &dmap_base);
+    }
+    klog_printf("[INIT] cr3=0x%lx dmap_base=0x%lx\n", cr3, dmap_base);
 
     uint64_t mp4_csw0 = mp4_parent_csws[0];
     for (int m = 0; m < mp4_count; m++) {
@@ -886,10 +895,10 @@ find_and_patch_mp4_cdevsw(void)
 
     uint64_t phys_end = 0;
     uint64_t phys_text = virt2phys(text_v, &phys_end, dmap_base, cr3);
-    klog_printf("[DUMP_PHYS] text_v=0x%llx -> phys_text=0x%llx\n",
+    klog_printf("[CALL] DUMP_PHYS text_v=0x%llx -> phys=0x%llx sz=128\n",
                 (unsigned long long)text_v, (unsigned long long)phys_text);
 
-    if (phys_text != (uint64_t)-1) {
+    if (phys_text != (uint64_t)-1 && cr3 && dmap_base) {
         uint8_t text_code[128] = {0};
         long r_phys = kekcall(KEKCALL_DUMP_PHYS, phys_text, (uintptr_t)text_code, 128);
         klog_printf("[DUMP_PHYS] KEKCALL_DUMP_PHYS ret=%ld\n", r_phys);
