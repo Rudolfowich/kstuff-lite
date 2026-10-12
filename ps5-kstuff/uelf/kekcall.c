@@ -319,8 +319,8 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         unsigned safety = 0;
         while (p && safety++ < 500) {
             uint64_t pid_u64 = 0;
-            kpeek64_checked(p + 0x78, &pid_u64);
-            /* p_pid at proc+0x78, int32 in low 32 bits */
+            kpeek64_checked(p + 0x2C0, &pid_u64);
+            /* p_pid at proc+0x2C0, int32 in low 32 bits */
             uint32_t pid = (uint32_t)(pid_u64 & 0xFFFFFFFF);
             if (pid == target_pid) {
                 kpeek64_checked(p + 0x40, &target_ucred);
@@ -380,8 +380,8 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         unsigned safety = 0;
         while (p && safety++ < 500) {
             uint64_t pid_u64 = 0;
-            /* p_pid at proc+0x78 (verified from ext_dump: ext[61]=0x0000006300000001) */
-            kpeek64_checked(p + 0x78, &pid_u64);
+            /* p_pid at proc+0x2C0 (ext[128]=0xDF=223=our pid, verified) */
+            kpeek64_checked(p + 0x2C0, &pid_u64);
             if ((uint32_t)(pid_u64 & 0xFFFFFFFF) == target_pid) {
                 kpeek64_checked(p + 0x40, &t_ucred);
                 kpeek64_checked(p + 0x48, &t_fd);
