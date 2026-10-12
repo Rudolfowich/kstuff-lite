@@ -101,9 +101,15 @@ install_ppr_a53(uint32_t system_fw_version)
 
     /* Запрашиваем kernel diagnostic dump — безопасно, только чтение */
     klog_puts("[a53] requesting UELF diagnostic dump (kekcall 8) ...\n");
-    long dump_ret = kekcall(KEKCALL_A53_DUMP, 0, 0, 0);
-    klog_printf("[a53] kekcall(8) returned=%ld — dump is in shared ring buffer\n",
-                dump_ret);
+    uint64_t dump[136] = {0};
+    long dump_ret = kekcall(KEKCALL_A53_DUMP, (uint64_t)dump, 136, 0);
+    klog_printf("[a53] kekcall(8) returned=%ld words written\n", dump_ret);
+
+    if (dump_ret > 0) {
+        for (long i = 0; i < dump_ret; i++) {
+            klog_printf("[a53] slot[%ld] = 0x%016llx\n", i, (unsigned long long)dump[i]);
+        }
+    }
 
     /* Device probe */
     if (probe_mp4_device() != 0) {
