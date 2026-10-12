@@ -135,6 +135,8 @@ probe_mp4_device(void)
             klog_puts("[a53] FOUND pointer in heap! Dumping surroundings of cdev...\n");
             for (int a = 0; a < 4 && a < nptr; a++) {
                 uint64_t cdev_ptr = g_finds[a] - 0x98;
+                klog_printf("[a53] dumping candidate cdev at 0x%llx (ptr at 0x%llx)...\n",
+                            (unsigned long long)cdev_ptr, (unsigned long long)g_finds[a]);
                 for (int i = 0; i < 64; i++) g_dump[i] = 0;
                 kekcall(KEKCALL_DUMP_MEM, g_finds[a], (uintptr_t)g_dump, 0);
                 for (int i = 0; i < 64; i++) {
