@@ -61,28 +61,48 @@ a53_find_profile(uint32_t fw, uint32_t cond)
 
 
 int
-probe_text_once(void)
+confirm_903700e9(void)
 {
-    /* ОДИН вызов, не в цикле. Dump по трём адресам. */
-    uint64_t cand[3] = {
-        0xffffffff92609e80ULL,  /* slot[73] - sysent entry? */
-        0xffffffff91c76520ULL,  /* ext[11] - вероятно .text */
-        0xffffffff8f2ea920ULL,  /* unique 0x8f segment */
-    };
+    /* Dump 1: ПРЯМО 0x903700e9 — что там, строка или код? */
+    {
+        uint64_t addr = 0xffffffff903700e9ULL;
+        uint8_t buf[64];
+        for (int i = 0; i < 64; i++) buf[i] = 0;
+        long r = kekcall(KEKCALL_DUMP_MEM, addr, (uintptr_t)buf, 64);
+        klog_printf("[A] 0x%llx ret=%ld\n", (unsigned long long)addr, r);
+        for (int i = 0; i < 64; i += 16) {
+            klog_printf("[A] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x | %c%c%c%c%c%c%c%c%c%c%c%c%c%c%c%c\n",
+                i,
+                buf[i], buf[i+1], buf[i+2], buf[i+3], buf[i+4], buf[i+5], buf[i+6], buf[i+7],
+                buf[i+8], buf[i+9], buf[i+10], buf[i+11], buf[i+12], buf[i+13], buf[i+14], buf[i+15],
+                (buf[i]>=32&&buf[i]<127)?buf[i]:'.',
+                (buf[i+1]>=32&&buf[i+1]<127)?buf[i+1]:'.',
+                (buf[i+2]>=32&&buf[i+2]<127)?buf[i+2]:'.',
+                (buf[i+3]>=32&&buf[i+3]<127)?buf[i+3]:'.',
+                (buf[i+4]>=32&&buf[i+4]<127)?buf[i+4]:'.',
+                (buf[i+5]>=32&&buf[i+5]<127)?buf[i+5]:'.',
+                (buf[i+6]>=32&&buf[i+6]<127)?buf[i+6]:'.',
+                (buf[i+7]>=32&&buf[i+7]<127)?buf[i+7]:'.',
+                (buf[i+8]>=32&&buf[i+8]<127)?buf[i+8]:'.',
+                (buf[i+9]>=32&&buf[i+9]<127)?buf[i+9]:'.',
+                (buf[i+10]>=32&&buf[i+10]<127)?buf[i+10]:'.',
+                (buf[i+11]>=32&&buf[i+11]<127)?buf[i+11]:'.',
+                (buf[i+12]>=32&&buf[i+12]<127)?buf[i+12]:'.',
+                (buf[i+13]>=32&&buf[i+13]<127)?buf[i+13]:'.',
+                (buf[i+14]>=32&&buf[i+14]<127)?buf[i+14]:'.',
+                (buf[i+15]>=32&&buf[i+15]<127)?buf[i+15]:'.');
+        }
+    }
 
-    for (int c = 0; c < 3; c++) {
-        klog_printf("[probe] === cand[%d] = 0x%llx ===\n",
-                    c, (unsigned long long)cand[c]);
-
-        /* Напрямую, без алайна (dump_mem сам выравнивает) */
-        uint8_t buf[128];
-        for (int i = 0; i < 128; i++) buf[i] = 0;
-
-        long r = kekcall(KEKCALL_DUMP_MEM, cand[c], (uintptr_t)buf, 128);
-        klog_printf("[probe] ret=%ld\n", r);
-
-        for (int i = 0; i < 128; i += 16) {
-            klog_printf("[probe] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+    /* Dump 2: расширенная структура 0x91c76520 (256 bytes) — увидим ПОЛНУЮ struct */
+    {
+        uint64_t addr = 0xffffffff91c76520ULL;
+        uint8_t buf[256];
+        for (int i = 0; i < 256; i++) buf[i] = 0;
+        long r = kekcall(KEKCALL_DUMP_MEM, addr, (uintptr_t)buf, 256);
+        klog_printf("[B] 0x%llx ret=%ld\n", (unsigned long long)addr, r);
+        for (int i = 0; i < 256; i += 16) {
+            klog_printf("[B] +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
                 i,
                 buf[i], buf[i+1], buf[i+2], buf[i+3], buf[i+4], buf[i+5], buf[i+6], buf[i+7],
                 buf[i+8], buf[i+9], buf[i+10], buf[i+11], buf[i+12], buf[i+13], buf[i+14], buf[i+15]);
@@ -94,7 +114,7 @@ probe_text_once(void)
 int
 probe_mp4_device(void)
 {
-    probe_text_once();
+    confirm_903700e9();
     return 0;
 }
 
