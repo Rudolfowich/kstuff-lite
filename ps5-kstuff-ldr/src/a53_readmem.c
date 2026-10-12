@@ -121,94 +121,66 @@ step_rodata_hunt(void)
 }
 
 int
-smart_xref_scan(void)
+dump_text_page_level(void)
 {
-    /* Динамический адрес строки "mp4/dump" для текущей сессии KASLR */
-    uint64_t str_mp4 = 0;
-    static uint64_t g_str[32];
-    for (int i = 0; i < 32; i++) g_str[i] = 0;
-    kekcall(KEKCALL_SCAN_DMEM, 32, (uintptr_t)g_str, 0);
-    for (int i = 0; i < 32; i++) {
-        if (g_str[i] && (g_str[i] & 0xff) == 0xaa) {
-            str_mp4 = g_str[i];
-            break;
-        }
-    }
-    if (!str_mp4) {
-        str_mp4 = 0xffffffff90fe38aaULL;
+    FILE *f = fopen("/data/kernel_text.bin", "wb");
+    if (!f) {
+        klog_perror("[DUMP] fopen /data/kernel_text.bin failed");
+        return -1;
     }
 
     uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
-
-    /* .text основного ядра: от (kbase - 0xA68000 & ~0xFFF) до kbase.
-     * Это гарантированно замапленный регион с copyin / doreti_iret. */
-    uint64_t text_start = (kbase - 0xA68000ULL) & ~0xFFFULL;
+    /* krodata = kbase
+     * ktext = kbase - 0xCC0000 (~12.75 MB) */
     uint64_t text_end   = kbase;
+    uint64_t text_start = kbase - 0xCC0000ULL;
 
-    klog_printf("[XR] kdata_base = 0x%llx, scan .text 0x%llx..0x%llx for xref to 0x%llx\n",
-                (unsigned long long)kbase,
-                (unsigned long long)text_start,
-                (unsigned long long)text_end,
-                (unsigned long long)str_mp4);
+    klog_printf("[DUMP] starting text dump: 0x%llx .. 0x%llx (12.75 MB)\n",
+                (unsigned long long)text_start, (unsigned long long)text_end);
 
-    /* Сканируем .text шагами по 64 KB, чтобы ни при каких условиях не триггерить watchdog ядра */
-    uint64_t chunk_step = 64ULL * 1024ULL;
-    uint32_t total_chunks = (uint32_t)((text_end - text_start) / chunk_step);
+    uint8_t buf[4096];
+    uint64_t total = 0, ok = 0, skip = 0;
 
-    klog_printf("[XR] scanning %u chunks (64 KB each) with safe-probe\n", total_chunks);
-
-    for (uint32_t chunk = 0; chunk < total_chunks; chunk++) {
-        uint64_t cs = text_start + (uint64_t)chunk * chunk_step;
-
-        /* SAFE PROBE: проверяем доступность адреса cs перед сканированием */
+    for (uint64_t addr = text_start; addr < text_end; addr += 4096) {
+        /* SAFE PROBE каждую страницу */
         uint64_t probe = 0;
-        if (kekcall(KEKCALL_SAFE_PEEK, cs, (uintptr_t)&probe, 0) != 0) {
-            continue;
-        }
-
-        uint64_t finds[16] = {0};
-        /* kekcall5(22, target, user_buf, start_abs, chunk_bytes=64KB) */
-        long n = kekcall5(KEKCALL_SCAN_XREF_V2, str_mp4, (uintptr_t)finds, cs, chunk_step);
-
-        if (n > 0) {
-            klog_printf("[XR] chunk %u @ 0x%llx: %ld xrefs\n",
-                        chunk, (unsigned long long)cs, n);
-            for (int i = 0; i < 16; i++) {
-                if (finds[i]) {
-                    uint64_t rip = finds[i];
-                    klog_printf("[XR]   xref @ 0x%llx\n", (unsigned long long)rip);
-
-                    /* Dump 128 bytes вокруг xref (-64 .. +64) для проверки пролога и контекста */
-                    uint64_t base = (rip - 64) & ~7ULL;
-                    uint8_t buf[128];
-                    for (int b = 0; b < 128; b++) buf[b] = 0;
-                    if (kekcall(KEKCALL_DUMP_MEM, base, (uintptr_t)buf, 128) == 0) {
-                        klog_printf("[XR]   code dump @ 0x%llx:\n", (unsigned long long)base);
-                        for (int b = 0; b < 128; b += 16) {
-                            klog_printf("[XR]     +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                                b,
-                                buf[b], buf[b+1], buf[b+2], buf[b+3],
-                                buf[b+4], buf[b+5], buf[b+6], buf[b+7],
-                                buf[b+8], buf[b+9], buf[b+10], buf[b+11],
-                                buf[b+12], buf[b+13], buf[b+14], buf[b+15]);
-                        }
-                    }
-                }
+        if (kekcall(KEKCALL_SAFE_PEEK, addr, (uintptr_t)&probe, 0) != 0) {
+            uint8_t zero[4096] = {0};
+            fwrite(zero, 1, 4096, f);
+            skip++;
+        } else {
+            for (int i = 0; i < 4096; i++) buf[i] = 0;
+            if (kekcall(KEKCALL_DUMP_MEM, addr, (uintptr_t)buf, 4096) == 0) {
+                fwrite(buf, 1, 4096, f);
+                ok++;
+            } else {
+                uint8_t zero[4096] = {0};
+                fwrite(zero, 1, 4096, f);
+                skip++;
             }
         }
+        total++;
 
-        /* Каждые 16 чанков (1 МБ) даем короткую паузу планировщику */
-        if ((chunk & 0x0F) == 0) {
-            usleep(5000);  /* 5 мс */
+        /* Прогресс каждый MB */
+        if ((total * 4096 % (1024 * 1024)) == 0) {
+            klog_printf("[DUMP] %llu MB (ok=%llu, skip=%llu)\n",
+                        (total * 4096) / (1024 * 1024),
+                        (unsigned long long)ok,
+                        (unsigned long long)skip);
+            usleep(50000);  /* 50 мс */
         }
     }
+
+    fclose(f);
+    klog_printf("[DUMP] done: /data/kernel_text.bin, %llu pages ok, %llu skip\n",
+                (unsigned long long)ok, (unsigned long long)skip);
     return 0;
 }
 
 int
 probe_mp4_device(void)
 {
-    smart_xref_scan();
+    dump_text_page_level();
     return 0;
 }
 
