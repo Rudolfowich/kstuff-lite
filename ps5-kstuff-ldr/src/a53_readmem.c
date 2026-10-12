@@ -61,9 +61,9 @@ probe_mp4_device(void)
 {
     uint64_t finds[32] = {0};
     klog_puts("[a53] scanning kernel for \"/dev/mp4\" string ...\n");
-    long nfound = kekcall(KEKCALL_SCAN_DMEM, 32 /* MB */, (uintptr_t)finds, 0);
+    long nfound = kekcall(KEKCALL_SCAN_DMEM, (uintptr_t)finds, 32 /* MB */, 0);
     klog_printf("[a53] scan found %ld occurrences in first 32MB\n", nfound);
-    for (int i = 0; i < 32 && finds[i]; i++) {
+    for (int i = 0; i < 32 && i < nfound; i++) {
         klog_printf("[a53] mp4_str[%d] = 0x%016llx\n", i, (unsigned long long)finds[i]);
     }
     return (nfound > 0) ? 0 : -1;

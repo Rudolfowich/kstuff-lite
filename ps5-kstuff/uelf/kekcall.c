@@ -433,11 +433,11 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
     else if(nr == 18)
     {
         /* SCAN_DMEM_FOR_STRING: ищем "/dev/mp4" в ядре.
-         * args[RDI] = scan_mb (размер скана, в МБ; default 32)
-         * args[RSI] = user_buf (uint64_t[32] для адресов находок)
+         * args[RDI] = user_buf (uint64_t[32] для адресов находок)
+         * args[RSI] = scan_mb (размер скана, в МБ; default 32)
          * return: число находок */
-        uint64_t user_buf = args[RSI];
-        uint64_t scan_mb = args[RDI];
+        uint64_t user_buf = args[RDI];
+        uint64_t scan_mb = args[RSI];
         if (!user_buf) return 1;
         if (scan_mb == 0 || scan_mb > 256) scan_mb = 32;
 
