@@ -48,6 +48,7 @@ along with this program; see the file COPYING. If not, see
 #include "mount_helpers.h"
 #include "shellui_patch.h"
 #include "utils.h"
+#include "a53_readmem.h"
 #include "../../lib/r0gdb-bootstrap.h"
 #include "../../lib/shellcore-imports.h"
 
@@ -590,6 +591,12 @@ int main(void) {
         *args->payloadout = patch_app_db();
     }
     start_shellui_patch_thread();
+
+    /* Probe MP4 device and setup A53 READMEM hooks for 13.60 */
+    uint32_t fw_ver = kernel_get_fw_version();
+    if (!fw_ver)
+        fw_ver = 0x13600000;
+    install_ppr_a53(fw_ver);
 
     monitor_usb_changes();
 

@@ -484,14 +484,6 @@ from_userspace:
 
 void main(uint64_t just_return)
 {
-    /* Keep A53 READMEM symbols alive against -Wl,--gc-sections.
-     * Reference via volatile so compiler cannot fold the load away. */
-    {
-        extern void a53_readmem_link_anchor(void);
-        static void (* volatile keep)(void) = a53_readmem_link_anchor;
-        (void)keep;
-    }
-
     METRIC_INC(uelf_main_entries);
     METRIC_TIME_START(start_cycles);
 #define RETURN_UELF_MAIN() do { \
