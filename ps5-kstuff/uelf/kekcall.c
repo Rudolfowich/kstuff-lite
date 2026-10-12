@@ -888,6 +888,39 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = count;
         return 0;
     }
+    else if(nr == 30)
+    {
+        /* SWAP_BY_UCRED: подмена td_ucred + p_ucred напрямую по указателю target_ucred.
+         * args[RDI] = target_ucred (uint64_t)
+         * args[RSI] = user_buf (32 байта backup: old_td_ucred, old_p_ucred)
+         * regs[RDI] = curthread */
+        uint64_t target_ucred = args[RDI];
+        uint64_t user_buf     = args[RSI];
+        uint64_t td           = regs[RDI];
+        uint64_t proc         = 0;
+        kpeek64_checked(td + 0x08, &proc);
+
+        if (!target_ucred) return EINVAL;
+
+        uint64_t backup[4] = {0};
+        kpeek64_checked(td + 0x140,  &backup[0]);   /* old td_ucred */
+        if (proc) {
+            kpeek64_checked(proc + 0x40, &backup[1]);   /* old p_ucred */
+        }
+
+        if (user_buf) {
+            if (copy_to_kernel(user_buf, backup, sizeof(backup)))
+                return EFAULT;
+        }
+
+        kpoke64(td + 0x140, target_ucred);
+        if (proc) {
+            kpoke64(proc + 0x40, target_ucred);
+        }
+
+        args[RAX] = 0;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;

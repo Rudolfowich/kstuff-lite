@@ -858,20 +858,26 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     for (int m = 0; m < mp4_count; m++) {
         uint64_t csw = mp4_parent_csws[m];
         if (!csw) continue;
-        if (strstr(mp4_names[m], "dump_for_decid")) {
+        if (strstr(mp4_names[m], "dump_for_decid") || strstr(mp4_names[m], "dump")) {
             dedicated_mp4_csw = csw;
             dedicated_mp4_cdev = mp4_cdev_nodes[m];
             long wr = kekcall(27 /* WRITE64 */, csw + 0x10ULL, orig_dopen_calc, 0);
             uint64_t rb = 0;
             kekcall(KEKCALL_DUMP_MEM, csw + 0x10ULL, (uintptr_t)&rb, 8);
-            klog_printf("[VERIFY] csw+0x10 after unpatch: 0x%llx (expected 0x%llx) %s (ret=%ld)\n",
-                        (unsigned long long)rb, (unsigned long long)orig_dopen_calc,
+            klog_printf("[VERIFY] csw[%d] (node '%s') +0x10 after unpatch: 0x%llx (expected 0x%llx) %s (ret=%ld)\n",
+                        m, mp4_names[m], (unsigned long long)rb, (unsigned long long)orig_dopen_calc,
                         (rb == orig_dopen_calc) ? "OK" : "MISMATCH", wr);
         }
     }
 
-    /* ТЕСТ ПЕРВЫЙ: Верификация работы SWAP_FULL */
-    klog_printf("[TEST1] === Verifying KEKCALL_SWAP_FULL credential switching ===\n");
+    /* Fallback: если не определился csw, берем адрес последнего найденного mp4_csw */
+    if (!dedicated_mp4_csw && mp4_count > 0) {
+        dedicated_mp4_csw = mp4_parent_csws[mp4_count - 1];
+        dedicated_mp4_cdev = mp4_cdev_nodes[mp4_count - 1];
+    }
+
+    /* ТЕСТ ПЕРВЫЙ: Верификация работы SWAP_BY_UCRED (KEKCALL 30) */
+    klog_printf("[TEST1] === Verifying KEKCALL_SWAP_BY_UCRED (nr 30) direct pointer swap ===\n");
     uint64_t my_td = 0;
     uint64_t ext_check[4] = {0};
     kekcall(KEKCALL_EXT_DUMP, 0, (uint64_t)ext_check, sizeof(ext_check));
@@ -882,33 +888,24 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     uint64_t init_target_ucred = g_cand_ucreds[0]; /* pid=1 ucred */
     
     uint64_t swap_bkp[4] = {0};
-    long swap_ret = kekcall(KEKCALL_SWAP_FULL, 1ULL, (uintptr_t)swap_bkp, 0);
+    long swap_ret = kekcall(KEKCALL_SWAP_BY_UCRED, init_target_ucred, (uintptr_t)swap_bkp, 0);
     kekcall(KEKCALL_DUMP_MEM, my_td + 0x140ULL, (uintptr_t)&ucred_after, 8);
     kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)swap_bkp, 0);
 
     klog_printf("[SWAP_VERIFY] ret=%ld before=0x%llx after=0x%llx target=0x%llx %s\n",
                 swap_ret, (unsigned long long)ucred_before, (unsigned long long)ucred_after,
                 (unsigned long long)init_target_ucred,
-                (ucred_after == init_target_ucred) ? "CONFIRMED_WORKING" : "SWAP_FAILED");
+                (ucred_after == init_target_ucred && init_target_ucred != 0) ? "CONFIRMED_WORKING" : "SWAP_FAILED");
 
     /* ТЕСТ ВТОРОЙ: Dump cdevsw mp4/dump_for_decid */
     if (dedicated_mp4_csw) {
-        klog_printf("[TEST2] === Full cdevsw dump for mp4/dump_for_decid @ 0x%llx ===\n",
+        klog_printf("[TEST2] === Full cdevsw dump for mp4 @ 0x%llx ===\n",
                     (unsigned long long)dedicated_mp4_csw);
         uint64_t fns[16] = {0};
         kekcall(KEKCALL_DUMP_MEM, dedicated_mp4_csw, (uintptr_t)fns, sizeof(fns));
-        klog_printf("[MP4_CSW] +0x00: ver/flags = 0x%016llx\n", (unsigned long long)fns[0]);
-        klog_printf("[MP4_CSW] +0x08: d_name   = 0x%016llx\n", (unsigned long long)fns[1]);
-        klog_printf("[MP4_CSW] +0x10: d_open   = 0x%016llx\n", (unsigned long long)fns[2]);
-        klog_printf("[MP4_CSW] +0x18: d_fdopen = 0x%016llx\n", (unsigned long long)fns[3]);
-        klog_printf("[MP4_CSW] +0x20: d_close  = 0x%016llx\n", (unsigned long long)fns[4]);
-        klog_printf("[MP4_CSW] +0x28: d_read   = 0x%016llx\n", (unsigned long long)fns[5]);
-        klog_printf("[MP4_CSW] +0x30: d_write  = 0x%016llx\n", (unsigned long long)fns[6]);
-        klog_printf("[MP4_CSW] +0x38: d_ioctl  = 0x%016llx\n", (unsigned long long)fns[7]);
-        klog_printf("[MP4_CSW] +0x40: d_poll   = 0x%016llx\n", (unsigned long long)fns[8]);
-        klog_printf("[MP4_CSW] +0x48: d_mmap   = 0x%016llx\n", (unsigned long long)fns[9]);
-        klog_printf("[MP4_CSW] +0x50: d_strat  = 0x%016llx\n", (unsigned long long)fns[10]);
-        klog_printf("[MP4_CSW] +0x58: d_dump   = 0x%016llx\n", (unsigned long long)fns[11]);
+        for (int i = 0; i < 12; i++) {
+            klog_printf("[MP4_CSW+0x%02x] = 0x%016llx\n", i * 8, (unsigned long long)fns[i]);
+        }
     }
 
     /* ТЕСТ ТРЕТИЙ: Dump cdev struct для /dev/mp4/dump_for_decid */
@@ -926,8 +923,8 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         }
     }
 
-    /* Шаг 3.2: Прогон всех отобранных кандидатов на нативном d_open */
-    klog_printf("[REAL_OPEN] === Testing native open under %d candidates ===\n", ncand);
+    /* Шаг 3.2: Прогон всех отобранных кандидатов на нативном d_open с KEKCALL_SWAP_BY_UCRED */
+    klog_printf("[REAL_OPEN] === Testing native open under %d candidates with SWAP_BY_UCRED ===\n", ncand);
 
     for (int c = 0; c < ncand; c++) {
         uint32_t tpid = g_cand_pids[c];
@@ -938,8 +935,10 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         klog_printf("[LOOP_PRE #%d] cand_pid=%u authid=0x%llx ucred=0x%llx\n",
                     c, (unsigned int)tpid, (unsigned long long)tauth, (unsigned long long)tucred);
 
+        if (!tucred) continue;
+
         /* Защита: boost ucred refcount на +100 */
-        if (tucred && (tucred & 0xFFFF000000000000ULL) == 0xFFFF000000000000ULL) {
+        if ((tucred & 0xFFFF000000000000ULL) == 0xFFFF000000000000ULL) {
             uint32_t ref = 0;
             kekcall(KEKCALL_DUMP_MEM, tucred, (uintptr_t)&ref, 4);
             if (ref > 0 && ref < 100000) {
@@ -957,8 +956,8 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         int rerr = 0;
         (void)rerr;
 
-        /* КРИТИЧЕСКИЙ SAFETY БЛОК: СВАП -> ВЫЗОВЫ -> РЕСТОР БЕЗ КЛОГОВ В СЕРЕДИНЕ */
-        long sr = kekcall(KEKCALL_SWAP_FULL, (uint64_t)tpid, (uintptr_t)backup, 0);
+        /* КРИТИЧЕСКИЙ SAFETY БЛОК: СВАП ЧЕРЕЗ KEKCALL 30 НАПРЯМУЮ ПО TUCRED */
+        long sr = kekcall(KEKCALL_SWAP_BY_UCRED, tucred, (uintptr_t)backup, 0);
         if (sr == 0) {
             fd_test = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
             err_test = errno;
