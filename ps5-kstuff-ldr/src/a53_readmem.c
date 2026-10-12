@@ -616,7 +616,7 @@ probe_opened_mp4_fd(int fd, const char *name)
 
 /* Полноценный полный обход d_devs для каждого найденного cdevsw БЕЗ прерываний */
 int
-find_and_patch_mp4_cdevsw(void)
+find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
 {
     klog_printf("[WALK] ====================================================\n");
     klog_printf("[WALK] FULL CDEV WALK: mapping all /dev nodes across %d cdevsw\n", g_cdevsw_count);
@@ -785,96 +785,157 @@ find_and_patch_mp4_cdevsw(void)
     klog_printf("[READ_TEST] Step 2 (.rodata @ 0x%llx): ret=%ld, str='%.16s'\n",
                 (unsigned long long)rodata_v, r_rodata, rodata_bytes);
 
-    /* Шаг 3: Полная энумерация ВСЕХ процессов через allproc (name + ucred + authid) */
-    klog_printf("[AUTH_ENUM] === ENUMERATING ALL PROCESSES IN ALLPROC (name + ucred + authid) ===\n");
-    uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
-    uint64_t allproc_addr = kbase + 0x28C9E80ULL;
-    uint64_t p = 0;
-    kekcall(KEKCALL_DUMP_MEM, allproc_addr, (uintptr_t)&p, 8);
+    /* Шаг 3: Полная энумерация ВСЕХ процессов в ОБЕ стороны от curproc_hint */
+    klog_printf("[AUTH_ENUM] === ENUMERATING PROCESSES BIDIRECTIONALLY FROM curproc_hint=0x%llx ===\n",
+                (unsigned long long)curproc_hint);
 
     uint32_t candidate_pids[32] = {0};
     char candidate_comms[32][32] = {{0}};
     uint64_t candidate_authids[32] = {0};
     int ncandidates = 0;
 
-    for (int cnt = 0; cnt < 500 && p; cnt++) {
-        uint64_t pid_u64 = 0;
-        char comm[32] = {0};
-        uint64_t ucred_ptr = 0;
-        uint64_t authid = 0;
+    /* Обход вперед (p_list.le_next @ proc + 0x00) и назад (p_list.le_prev @ proc + 0x08) */
+    for (int dir = 0; dir < 2; dir++) {
+        uint64_t cur = curproc_hint;
+        for (int cnt = 0; cnt < 250 && cur; cnt++) {
+            uint64_t pid_u64 = 0;
+            char comm[32] = {0};
+            uint64_t ucred_ptr = 0;
+            uint64_t authid = 0;
 
-        kekcall(KEKCALL_DUMP_MEM, p + 0xBC, (uintptr_t)&pid_u64, 8);
-        kekcall(KEKCALL_DUMP_MEM, p + 0x448, (uintptr_t)comm, 32);
-        kekcall(KEKCALL_DUMP_MEM, p + 0x48, (uintptr_t)&ucred_ptr, 8);
-        comm[31] = 0;
-        uint32_t pid = (uint32_t)(pid_u64 & 0xFFFFFFFF);
+            kekcall(KEKCALL_DUMP_MEM, cur + 0xBC, (uintptr_t)&pid_u64, 8);
+            if (!pid_u64) {
+                kekcall(KEKCALL_DUMP_MEM, cur + 0xB0, (uintptr_t)&pid_u64, 8);
+            }
+            kekcall(KEKCALL_DUMP_MEM, cur + 0x44C, (uintptr_t)comm, 24);
+            if (!comm[0]) {
+                kekcall(KEKCALL_DUMP_MEM, cur + 0x448, (uintptr_t)comm, 24);
+            }
+            comm[23] = 0;
+            uint32_t pid = (uint32_t)(pid_u64 & 0xFFFFFFFF);
 
-        if (ucred_ptr > 0xffff800000000000ULL) {
-            kekcall(KEKCALL_DUMP_MEM, ucred_ptr + 0x58, (uintptr_t)&authid, 8);
-        }
+            kekcall(KEKCALL_DUMP_MEM, cur + 0x40, (uintptr_t)&ucred_ptr, 8);
+            if (ucred_ptr > 0xffff800000000000ULL) {
+                kekcall(KEKCALL_DUMP_MEM, ucred_ptr + 0x58, (uintptr_t)&authid, 8);
+            }
 
-        /* Логируем каждый найденный процесс с его authid */
-        klog_printf("[PROC] #%d pid=%u comm='%s' ucred=0x%llx authid=0x%016llx\n",
-                    cnt, pid, comm, (unsigned long long)ucred_ptr, (unsigned long long)authid);
+            if (comm[0] && pid > 0) {
+                /* Проверяем дубликаты */
+                int dup = 0;
+                for (int i = 0; i < ncandidates; i++) {
+                    if (candidate_pids[i] == pid) { dup = 1; break; }
+                }
 
-        /* Кандидаты: decid, ShellCore, sys*, vsh, audiod, avcontrol, или любой с authid 0x3800... */
-        if (strstr(comm, "deci") || strstr(comm, "Shell") || strstr(comm, "sys") ||
-            strstr(comm, "Sys") || strstr(comm, "vsh") || strstr(comm, "audio") ||
-            strstr(comm, "media") || strstr(comm, "av") ||
-            ((authid >> 48) == 0x3800) || pid == 1) {
-            if (ncandidates < 32) {
-                candidate_pids[ncandidates] = pid;
-                strncpy(candidate_comms[ncandidates], comm, 31);
-                candidate_authids[ncandidates] = authid;
-                ncandidates++;
+                if (!dup) {
+                    klog_printf("[PROC] dir=%d #%d pid=%u comm='%s' ucred=0x%llx authid=0x%016llx\n",
+                                dir, cnt, pid, comm, (unsigned long long)ucred_ptr, (unsigned long long)authid);
+
+                    if (strstr(comm, "VideoCore") || strstr(comm, "MediaCore") ||
+                        strstr(comm, "AvControl") || strstr(comm, "AvCapture") ||
+                        strstr(comm, "audiod") || strstr(comm, "SysCore") ||
+                        strstr(comm, "ShellCore") || strstr(comm, "decid") ||
+                        ((authid >> 48) == 0x3800) || pid == 1) {
+                        if (ncandidates < 32) {
+                            candidate_pids[ncandidates] = pid;
+                            strncpy(candidate_comms[ncandidates], comm, 31);
+                            candidate_authids[ncandidates] = authid;
+                            ncandidates++;
+                        }
+                    }
+                }
+            }
+
+            /* Шаг перехода к следующему / предыдущему процессу */
+            if (dir == 0) {
+                /* Вперед: p_list.le_next */
+                uint64_t next = 0;
+                kekcall(KEKCALL_DUMP_MEM, cur + 0x00, (uintptr_t)&next, 8);
+                if (!next) {
+                    kekcall(KEKCALL_DUMP_MEM, cur + 0x10, (uintptr_t)&next, 8);
+                }
+                cur = next;
+            } else {
+                /* Назад: p_list.le_prev указывает на le_next предыдущего */
+                uint64_t prev_ptr = 0;
+                kekcall(KEKCALL_DUMP_MEM, cur + 0x08, (uintptr_t)&prev_ptr, 8);
+                cur = prev_ptr ? (prev_ptr - 0x00) : 0;
+                if (cur == curproc_hint) break;
             }
         }
-
-        uint64_t next = 0;
-        kekcall(KEKCALL_DUMP_MEM, p + 0x10, (uintptr_t)&next, 8);
-        p = next;
     }
 
     /* Шаг 3.1: Тест открытия /dev/mp4/dump_for_decid под кредами кандидатов (РОДНОЙ d_open БЕЗ ПАТЧА!) */
-    klog_printf("[REAL_OPEN] === Testing native open of /dev/mp4/dump_for_decid under %d candidate ucreds ===\n", ncandidates);
-    for (int t = 0; t < ncandidates; t++) {
-        uint32_t tpid = candidate_pids[t];
-        const char *tcomm = candidate_comms[t];
-        uint64_t tauth = candidate_authids[t];
-        uint64_t backup[4] = {0};
+    klog_printf("[REAL_OPEN] === Testing native open under %d candidates (SAFETY: no intermediate klog during swap) ===\n", ncandidates);
 
-        long sr = kekcall(KEKCALL_SWAP_FULL, tpid, (uintptr_t)backup, 0);
-        int fd_test = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
-        int err_test = errno;
-        if (fd_test < 0 && err_test == 1 /* EPERM */) {
-            fd_test = open("/dev/mp4/dump_for_decid", 0x0000 /* O_RDONLY */);
-            err_test = errno;
-        }
+    /* Сортировка приоритетов кандидатов */
+    const char *prio_names[] = {
+        "VideoCore",
+        "MediaCore",
+        "AvControl",
+        "AvCapture",
+        "audiod",
+        "SysCore",
+        "ShellCore"
+    };
 
-        klog_printf("[REAL_OPEN] pid=%u (%s) authid=0x%016llx -> swap_ret=%ld fd=%d errno=%d\n",
-                    tpid, tcomm, (unsigned long long)tauth, sr, fd_test, err_test);
+    for (int prio_idx = 0; prio_idx < 7; prio_idx++) {
+        const char *pname = prio_names[prio_idx];
+        for (int t = 0; t < ncandidates; t++) {
+            if (!strstr(candidate_comms[t], pname)) continue;
 
-        if (fd_test >= 0) {
-            klog_printf("[REAL_OPEN] *** BINGO! /dev/mp4/dump_for_decid OPENED NATIVELY WITH %s (pid %u)! ***\n",
-                        tcomm, tpid);
+            uint32_t tpid = candidate_pids[t];
+            const char *tcomm = candidate_comms[t];
+            uint64_t tauth = candidate_authids[t];
+
+            uint64_t backup[4] = {0};
+            int fd_test = -1;
+            int err_test = 0;
+            ssize_t nw = -1;
+            int werr = 0;
             uint8_t native_buf[256] = {0};
-            ssize_t nr_nat = read(fd_test, native_buf, sizeof(native_buf));
-            klog_printf("[REAL_OPEN] native read nr=%zd errno=%d\n", nr_nat, errno);
-            if (nr_nat > 0) {
-                klog_printf("[REAL_OPEN] +0x00: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                            native_buf[0], native_buf[1], native_buf[2], native_buf[3],
-                            native_buf[4], native_buf[5], native_buf[6], native_buf[7]);
-            }
-            close(fd_test);
-            /* Если открылся — восстанавливаем креды и выходим победителем! */
-            if (sr == 0) kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)backup, 0);
-            return 0;
-        }
+            ssize_t nr = -1;
+            int rerr = 0;
 
-        if (sr == 0) {
-            kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)backup, 0);
+            /* КРИТИЧЕСКИЙ SAFETY БЛОК: СВАП -> ВЫЗОВЫ -> РЕСТОР БЕЗ КЛОГОВ В СЕРЕДИНЕ */
+            long sr = kekcall(KEKCALL_SWAP_FULL, tpid, (uintptr_t)backup, 0);
+            if (sr == 0) {
+                fd_test = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
+                err_test = errno;
+                if (fd_test < 0 && err_test == 1) {
+                    fd_test = open("/dev/mp4/dump_for_decid", 0x0000 /* O_RDONLY */);
+                    err_test = errno;
+                }
+                if (fd_test >= 0) {
+                    /* Сессия инициализирована родным d_open! Пробуем сразу write и read */
+                    uint8_t zero8[8] = {0};
+                    nw = write(fd_test, zero8, 8);
+                    werr = errno;
+                    nr = read(fd_test, native_buf, sizeof(native_buf));
+                    rerr = errno;
+                }
+                kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)backup, 0);
+            }
+
+            /* ЛОГИРУЕМ ТОЛЬКО ПОСЛЕ ПОЛНОГО ВОССТАНОВЛЕНИЯ КРЕДОВ */
+            klog_printf("[REAL_OPEN] candidate '%s' (pid %u authid=0x%016llx) -> swap=%ld fd=%d errno=%d\n",
+                        tcomm, tpid, (unsigned long long)tauth, sr, fd_test, err_test);
+
+            if (fd_test >= 0) {
+                klog_printf("[REAL_OPEN] *** BINGO! /dev/mp4/dump_for_decid OPENED NATIVELY WITH %s (pid %u)! ***\n",
+                            tcomm, tpid);
+                klog_printf("[REAL_OPEN] write nw=%zd errno=%d, read nr=%zd errno=%d\n",
+                            nw, werr, nr, rerr);
+                if (nr > 0) {
+                    klog_printf("[REAL_OPEN] +0x00: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                native_buf[0], native_buf[1], native_buf[2], native_buf[3],
+                                native_buf[4], native_buf[5], native_buf[6], native_buf[7]);
+                }
+                close(fd_test);
+                return 0;
+            }
         }
     }
+
 
     /* Шаг 4: патчим все найденные mp4 cdevsw */
     for (int m = 0; m < mp4_count; m++) {
@@ -932,10 +993,9 @@ find_and_patch_mp4_cdevsw(void)
 int
 probe_mp4_device(uint64_t curproc_hint)
 {
-    (void)curproc_hint;
     /* test_mp4_open_with_root(); */
     scan_cdevsw();
-    find_and_patch_mp4_cdevsw();
+    find_and_patch_mp4_cdevsw(curproc_hint);
     return 0;
 }
 
