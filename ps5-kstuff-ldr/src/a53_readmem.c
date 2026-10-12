@@ -211,9 +211,52 @@ find_mp4_cdevsw(void)
 }
 
 int
+test_mp4_open_with_root(void)
+{
+    uint64_t backup[4] = {0};
+
+    klog_printf("[OPEN] attempting /dev/mp4/dump WITHOUT swap first (baseline)\n");
+    int fd1 = open("/dev/mp4/dump", O_RDWR);
+    int err1 = errno;
+    klog_printf("[OPEN] baseline: fd=%d errno=%d\n", fd1, err1);
+    if (fd1 >= 0) close(fd1);
+
+    klog_printf("[OPEN] now with KEKCALL_SWAP_FULL (target_pid=1 root ucred)\n");
+    /* args[RDI]=target_pid (1 = init/root), args[RSI]=user_buf (backup) */
+    long sr = kekcall(KEKCALL_SWAP_FULL, 1, (uintptr_t)backup, 0);
+    klog_printf("[OPEN] swap ret=%ld\n", sr);
+
+    int fd2 = open("/dev/mp4/dump", O_RDWR);
+    int err2 = errno;
+    klog_printf("[OPEN] with-swap: fd=%d errno=%d\n", fd2, err2);
+
+    /* args[RSI]=user_buf (backup) */
+    long rr = kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)backup, 0);
+    klog_printf("[OPEN] restored (ret=%ld)\n", rr);
+
+    if (fd2 >= 0) {
+        klog_printf("[OPEN] *** SUCCESS! /dev/mp4/dump opened with root ucred (fd=%d) ***\n", fd2);
+        klog_printf("[OPEN] *** FPKG unlock = SWAP + open, no patching needed! ***\n");
+        close(fd2);
+        return 0;
+    } else {
+        klog_printf("[OPEN] blocked. errno=%d\n", err2);
+        if (err2 == EPERM)
+            klog_printf("[OPEN]   EPERM(1): check is NOT simply ucred-based or device has specific check\n");
+        else if (err2 == EACCES)
+            klog_printf("[OPEN]   EACCES(13): permission on device node\n");
+        else if (err2 == ENODEV)
+            klog_printf("[OPEN]   ENODEV(19): device driver not active\n");
+        else if (err2 == EBUSY)
+            klog_printf("[OPEN]   EBUSY(16): already open/busy\n");
+        return -1;
+    }
+}
+
+int
 probe_mp4_device(void)
 {
-    find_mp4_cdevsw();
+    test_mp4_open_with_root();
     return 0;
 }
 

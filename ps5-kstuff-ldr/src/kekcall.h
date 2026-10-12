@@ -11,6 +11,7 @@
 #define KEKCALL_SWAP_UCRED_PID    14
 #define KEKCALL_RESTORE_UCRED_PTR 15
 #define KEKCALL_SWAP_FULL         16
+#define KEKCALL_RESTORE_FULL      17
 #define KEKCALL_SCAN_DMEM         18
 #define KEKCALL_DUMP_MEM          19
 #define KEKCALL_SCAN_XREF         20
