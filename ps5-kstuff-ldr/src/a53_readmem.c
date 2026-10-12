@@ -403,6 +403,11 @@ static uint64_t g_cdevsw_list[256];
 static char     g_cdevsw_names[256][32];
 static int      g_cdevsw_count = 0;
 
+static uint32_t g_cand_pids[32];
+static uint64_t g_cand_authids[32];
+static uint64_t g_cand_ucreds[32];
+static char     g_cand_comms[32][32];
+
 int
 scan_cdevsw(void)
 {
@@ -785,11 +790,11 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                     i, pid, comm, (unsigned long long)ucred, (unsigned long long)authid);
     }
 
-    /* Сессионно-независимый отбор кандидатов по authid */
-    uint32_t cand_pids[32] = {0};
-    uint64_t cand_authids[32] = {0};
-    uint64_t cand_ucreds[32] = {0};
-    char cand_comms[32][32] = {{0}};
+    /* Сессионно-независимый отбор кандидатов по authid (в глобальные статические массивы) */
+    memset(g_cand_pids, 0, sizeof(g_cand_pids));
+    memset(g_cand_authids, 0, sizeof(g_cand_authids));
+    memset(g_cand_ucreds, 0, sizeof(g_cand_ucreds));
+    memset(g_cand_comms, 0, sizeof(g_cand_comms));
     int ncand = 0;
 
     /* ПЕРВЫЙ КАНДИДАТ ВСЕГДА: pid=1 (init baseline) */
@@ -797,10 +802,10 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         uint8_t *entry = proc_buf + i * 48;
         uint32_t pid = *(uint32_t*)(entry + 0);
         if (pid == 1 && ncand < 32) {
-            cand_pids[ncand] = 1;
-            cand_authids[ncand] = *(uint64_t*)(entry + 36);
-            cand_ucreds[ncand] = *(uint64_t*)(entry + 28);
-            memcpy(cand_comms[ncand], entry + 4, 24);
+            g_cand_pids[ncand] = 1;
+            g_cand_authids[ncand] = *(uint64_t*)(entry + 36);
+            g_cand_ucreds[ncand] = *(uint64_t*)(entry + 28);
+            memcpy(g_cand_comms[ncand], entry + 4, 24);
             ncand++;
             break;
         }
@@ -821,10 +826,10 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         int is_sce   = ((auth >> 48) == 0x3800);
 
         if ((is_media || is_debug || is_sce) && ncand < 32) {
-            cand_pids[ncand] = pid;
-            cand_authids[ncand] = auth;
-            cand_ucreds[ncand] = *(uint64_t*)(entry + 28);
-            memcpy(cand_comms[ncand], entry + 4, 24);
+            g_cand_pids[ncand] = pid;
+            g_cand_authids[ncand] = auth;
+            g_cand_ucreds[ncand] = *(uint64_t*)(entry + 28);
+            memcpy(g_cand_comms[ncand], entry + 4, 24);
             ncand++;
         }
     }
@@ -832,7 +837,7 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     klog_printf("[REAL_OPEN] filtered %d candidates from %ld procs\n", ncand, total_procs);
     for (int c = 0; c < ncand; c++) {
         klog_printf("[CAND #%d] pid=%u authid=0x%016llx ucred=0x%llx\n",
-                    c, cand_pids[c], (unsigned long long)cand_authids[c], (unsigned long long)cand_ucreds[c]);
+                    c, g_cand_pids[c], (unsigned long long)g_cand_authids[c], (unsigned long long)g_cand_ucreds[c]);
     }
 
     if (ncand == 0) {
@@ -862,9 +867,13 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     klog_printf("[REAL_OPEN] === Testing native open under %d candidates ===\n", ncand);
 
     for (int c = 0; c < ncand; c++) {
-        uint32_t tpid = cand_pids[c];
-        uint64_t tauth = cand_authids[c];
-        uint64_t tucred = cand_ucreds[c];
+        uint32_t tpid = g_cand_pids[c];
+        uint64_t tauth = g_cand_authids[c];
+        uint64_t tucred = g_cand_ucreds[c];
+
+        /* Обязательный debug-лог ПЕРЕД swap */
+        klog_printf("[LOOP_PRE #%d] cand_pid=%u authid=0x%llx ucred=0x%llx\n",
+                    c, (unsigned int)tpid, (unsigned long long)tauth, (unsigned long long)tucred);
 
         /* Защита: boost ucred refcount на +100 */
         if (tucred && (tucred & 0xFFFF000000000000ULL) == 0xFFFF000000000000ULL) {
@@ -886,7 +895,7 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         (void)rerr;
 
         /* КРИТИЧЕСКИЙ SAFETY БЛОК: СВАП -> ВЫЗОВЫ -> РЕСТОР БЕЗ КЛОГОВ В СЕРЕДИНЕ */
-        long sr = kekcall(KEKCALL_SWAP_FULL, tpid, (uintptr_t)backup, 0);
+        long sr = kekcall(KEKCALL_SWAP_FULL, (uint64_t)tpid, (uintptr_t)backup, 0);
         if (sr == 0) {
             fd_test = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
             err_test = errno;
@@ -905,8 +914,10 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         }
 
         /* ЛОГИРУЕМ ТОЛЬКО ПОСЛЕ ПОЛНОГО ВОССТАНОВЛЕНИЯ КРЕДОВ */
-        klog_printf("[REAL_OPEN #%d pid=%u] (authid=0x%016llx) -> swap=%ld fd=%d errno=%d write nw=%zd errno=%d\n",
-                    c, tpid, (unsigned long long)tauth, sr, fd_test, err_test, nw, werr);
+        klog_printf("[REAL_OPEN #%d] pid=%u authid=0x%016llx swap=%ld\n",
+                    c, (unsigned int)tpid, (unsigned long long)tauth, sr);
+        klog_printf("[REAL_OPEN #%d_RES] fd=%d errno=%d write nw=%ld errno=%d\n",
+                    c, fd_test, err_test, (long)nw, werr);
 
         if (fd_test >= 0 && nw > 0) {
             klog_printf("[REAL_OPEN] *** BINGO! VICTORY! Native d_open + write SUCCESS under pid %u! ***\n", tpid);
