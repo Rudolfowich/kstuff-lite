@@ -241,10 +241,7 @@ install_ppr_a53(uint32_t system_fw_version)
         }
     }
 
-    /* Confirm MP4 ioctl handlers / driver text */
-    confirm_mp4_text(ext_buf);
-
-    /* Device probe */
+    /* Device probe (runs xref_scan_text) */
     if (probe_mp4_device() != 0) {
         klog_puts("[a53] MP4 device not accessible — abort\n");
         return -2;
