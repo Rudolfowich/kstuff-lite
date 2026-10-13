@@ -2027,7 +2027,7 @@ install_ppr_a53(uint32_t system_fw_version)
                 memset(chunk, 0, sizeof(chunk));
                 /* DUMP_MEM вместо SAFE_PEEK: умеет большие страницы .text, падает мягко
                  * (возвращает нули для unmapped qword'ов, а не крашит ядро). */
-                long ret = kekcall(KEKCALL_DUMP_MEM, cur, (uint64_t)chunk, sizeof(chunk));
+                (void)kekcall(KEKCALL_DUMP_MEM, cur, (uint64_t)chunk, sizeof(chunk));
                 /* Эмпирика: если весь чанк пустой — скорее всего unmapped */
                 int all_zero = 1;
                 for (int z = 0; z < 64; z++) {
