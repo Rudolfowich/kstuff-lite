@@ -1269,31 +1269,11 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         }
 
         if (found_fd_files) {
-            /* Без klog внутри ядра: определяем header и stride по fd=0,1,2 */
-            int best_header = -1;
-            int best_stride = -1;
-
-            for (int stride = 0x18; stride <= 0x30; stride += 8) {
-                for (int header = 0; header <= 0x20; header += 8) {
-                    int match_count = 0;
-                    for (int test_fd = 0; test_fd < 3; test_fd++) {
-                        uint64_t fp = 0;
-                        kpeek64_checked(found_fd_files + header + (uint64_t)test_fd * stride, &fp);
-                        if ((fp >> 48) == 0xffff && (fp >> 40) != 0xffffff && fp != 0) {
-                            match_count++;
-                        }
-                    }
-                    if (match_count >= 2 && best_header == -1) {
-                        best_header = header;
-                        best_stride = stride;
-                    }
-                }
-            }
-
-            if (best_header != -1 && best_stride != -1) {
-                kpeek64_checked(found_fd_files + best_header + (uint64_t)target_fd_mp4 * best_stride, &found_fp_mp4);
-                kpeek64_checked(found_fd_files + best_header + (uint64_t)target_fd_null * best_stride, &found_fp_null);
-            }
+            /* Проверенная структура PS5 Prospero fdt:
+             * header = 0x10, stride = 0x08 (плоский массив struct file*)
+             */
+            kpeek64_checked(found_fd_files + 0x10ULL + (uint64_t)target_fd_mp4 * 8ULL, &found_fp_mp4);
+            kpeek64_checked(found_fd_files + 0x10ULL + (uint64_t)target_fd_null * 8ULL, &found_fp_null);
         }
 
         if (user_buf) {
