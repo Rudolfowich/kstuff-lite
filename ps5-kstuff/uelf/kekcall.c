@@ -1283,9 +1283,9 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
              * [2] = fp_mp4
              * [3] = fp_null
              * [4] = p_fd_off
-             * [5..15] = первые 11 qwords из fdt для полного анализа в юзерленде
+             * [5..36] = первые 32 qwords из fdt (256 байт) для полного анализа таблицы в юзерленде
              */
-            uint64_t out[16] = {0};
+            uint64_t out[37] = {0};
             out[0] = found_p_fd;
             out[1] = found_fd_files;
             out[2] = found_fp_mp4;
@@ -1293,7 +1293,7 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
             out[4] = (uint64_t)found_off;
 
             if (found_fd_files) {
-                for (int i = 0; i < 11; i++) {
+                for (int i = 0; i < 32; i++) {
                     kpeek64_checked(found_fd_files + (uint64_t)i * 8, &out[5 + i]);
                 }
             }
@@ -1317,18 +1317,24 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         uint64_t user_buf = args[RDX];
         uint32_t detected_cdevpriv_off = 0;
 
+        /* КРИТИЧЕСКАЯ ЗАЩИТА: проверяем, что оба указателя — валидные адреса ядра в куче! */
+        if ((fp_mp4 >> 48) != 0xffff || (fp_null >> 48) != 0xffff ||
+            (fp_mp4 >> 40) == 0xffffff || (fp_null >> 40) == 0xffffff ||
+            fp_mp4 < 0xffff800000000000ULL || fp_null < 0xffff800000000000ULL) {
+            args[RAX] = 0;
+            return 0;
+        }
+
         uint64_t diff_out[32] = {0};
 
-        if (fp_mp4 && fp_null) {
-            for (int i = 0; i < 24; i++) {
-                uint64_t vm = 0, vn = 0;
-                kpeek64_checked(fp_mp4 + (uint64_t)i * 8, &vm);
-                kpeek64_checked(fp_null + (uint64_t)i * 8, &vn);
+        for (int i = 0; i < 24; i++) {
+            uint64_t vm = 0, vn = 0;
+            if (kpeek64_checked(fp_mp4 + (uint64_t)i * 8, &vm) != 0) break;
+            if (kpeek64_checked(fp_null + (uint64_t)i * 8, &vn) != 0) break;
 
-                diff_out[i] = (vm ^ vn);
-                if (vm == 0 && (vn >> 48) == 0xffff && (vn >> 40) != 0xffffff && !detected_cdevpriv_off) {
-                    detected_cdevpriv_off = (uint32_t)(i * 8);
-                }
+            diff_out[i] = (vm ^ vn);
+            if (vm == 0 && (vn >> 48) == 0xffff && (vn >> 40) != 0xffffff && !detected_cdevpriv_off) {
+                detected_cdevpriv_off = (uint32_t)(i * 8);
             }
         }
 
@@ -1344,13 +1350,19 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         /* KEKCALL 38: INJECT_CDEVPRIV (запись softc/cdevpriv в fp + offset)
          * args[RDI] = fp_mp4
          * args[RSI] = offset (e.g. detected_cdevpriv_off, or 0x38, 0x40, 0x48)
-         * args[RDX] = value_to_write (e.g. dedicated_mp4_cdev or softc)
+         * args[RDX] = value_to_write (e.g. dedicated_mp4_cdev или softc)
          * return: old value in RAX
          */
         uint64_t fp_mp4 = args[RDI];
         uint64_t offset = args[RSI];
         uint64_t new_val = args[RDX];
         uint64_t old_val = 0;
+
+        /* КРИТИЧЕСКАЯ ЗАЩИТА: проверка адреса */
+        if ((fp_mp4 >> 48) != 0xffff || fp_mp4 < 0xffff800000000000ULL || offset > 0x200) {
+            args[RAX] = 0;
+            return 0;
+        }
 
         if (fp_mp4 && offset) {
             kpeek64_checked(fp_mp4 + offset, &old_val);
@@ -1371,7 +1383,7 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         uint64_t offset = args[RSI];
         uint64_t cur_val = 0;
 
-        if (fp_mp4) {
+        if ((fp_mp4 >> 48) == 0xffff && fp_mp4 >= 0xffff800000000000ULL && offset <= 0x200) {
             kpeek64_checked(fp_mp4 + offset, &cur_val);
         }
 
