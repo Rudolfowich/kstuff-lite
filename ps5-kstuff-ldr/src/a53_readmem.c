@@ -1505,20 +1505,72 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                 }
                 if (jfd >= 0) {
                     klog_printf("[DOPEN_JMP_OPEN] *** SUCCESS *** opened mp4/dump_for_decid with legitimate init!\n");
-                    /* Пробуем write и ioctl чтобы увидеть реально ли softc инициализирован */
-                    errno = 0;
-                    char tbuf[16] = "test";
-                    ssize_t nw = write(jfd, tbuf, 4);
-                    int we = errno;
-                    klog_printf("[DOPEN_JMP_OPEN] write(4 bytes) = %zd errno=%d\n", nw, we);
 
+                    /* d_write — это заглушка (b8 13 00 00 00 c3 = mov eax, ENODEV; ret),
+                     * write в этот device не предусмотрен. Это dump-only identifier
+                     * channel. Пробуем read разных размеров и ioctl для trigger'а. */
+
+                    /* 1) RAW READ разных размеров */
+                    static uint8_t rbuf[4096];
+                    for (unsigned int rsz = 16; rsz <= 4096; rsz <<= 1) {
+                        memset(rbuf, 0, sizeof(rbuf));
+                        errno = 0;
+                        ssize_t nr = read(jfd, rbuf, rsz);
+                        int re = errno;
+                        klog_printf("[READ_%u] nr=%zd errno=%d first16=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                    rsz, nr, re,
+                                    rbuf[0],rbuf[1],rbuf[2],rbuf[3], rbuf[4],rbuf[5],rbuf[6],rbuf[7],
+                                    rbuf[8],rbuf[9],rbuf[10],rbuf[11], rbuf[12],rbuf[13],rbuf[14],rbuf[15]);
+                        if (nr > 0) {
+                            klog_printf("[READ_%u] *** GOT DATA *** full hex dump of %zd bytes:\n", rsz, nr);
+                            for (ssize_t off = 0; off < nr && off < 256; off += 16) {
+                                klog_printf("[DUMP+%03zx] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                            off,
+                                            rbuf[off+0], rbuf[off+1], rbuf[off+2], rbuf[off+3],
+                                            rbuf[off+4], rbuf[off+5], rbuf[off+6], rbuf[off+7],
+                                            rbuf[off+8], rbuf[off+9], rbuf[off+10], rbuf[off+11],
+                                            rbuf[off+12], rbuf[off+13], rbuf[off+14], rbuf[off+15]);
+                            }
+                            break; /* нашли данные — хватит перебирать размеры */
+                        }
+                    }
+
+                    /* 2) IOCTL probe: пробуем _IO('m', 0..7) без данных + с мелким in/out */
+                    /* _IO(g,n)   = (0u<<30) | (0<<16) | (g<<8) | n   */
+                    /* _IOR(g,n,t)= (2u<<30) | (sz<<16) | (g<<8) | n  */
+                    /* _IOW(g,n,t)= (1u<<30) | (sz<<16) | (g<<8) | n  */
+                    static uint8_t iobuf[4096] = {0};
+                    for (int cmd = 0; cmd < 8; cmd++) {
+                        memset(iobuf, 0, sizeof(iobuf));
+                        unsigned int req_io = (0u << 30) | (0 << 16) | ('m' << 8) | cmd;
+                        errno = 0;
+                        int ir = ioctl(jfd, req_io, iobuf);
+                        int ie = errno;
+                        klog_printf("[IOCTL_IO m,%d] req=0x%08x ret=%d errno=%d first8=%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                                    cmd, req_io, ir, ie,
+                                    iobuf[0],iobuf[1],iobuf[2],iobuf[3],
+                                    iobuf[4],iobuf[5],iobuf[6],iobuf[7]);
+
+                        memset(iobuf, 0, sizeof(iobuf));
+                        unsigned int req_ior = (2u << 30) | (256u << 16) | ('m' << 8) | cmd;
+                        errno = 0;
+                        ir = ioctl(jfd, req_ior, iobuf);
+                        ie = errno;
+                        klog_printf("[IOCTL_IOR m,%d] req=0x%08x ret=%d errno=%d first16=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                    cmd, req_ior, ir, ie,
+                                    iobuf[0],iobuf[1],iobuf[2],iobuf[3], iobuf[4],iobuf[5],iobuf[6],iobuf[7],
+                                    iobuf[8],iobuf[9],iobuf[10],iobuf[11], iobuf[12],iobuf[13],iobuf[14],iobuf[15]);
+                    }
+
+                    /* 3) После ioctl-попыток — ещё один read 4096 на случай если ioctl разогрел буфер */
+                    memset(rbuf, 0, sizeof(rbuf));
                     errno = 0;
-                    ssize_t nr = read(jfd, tbuf, sizeof(tbuf));
-                    int re = errno;
-                    klog_printf("[DOPEN_JMP_OPEN] read(16 bytes) = %zd errno=%d first4=%02x %02x %02x %02x\n",
-                                nr, re,
-                                (unsigned char)tbuf[0], (unsigned char)tbuf[1],
-                                (unsigned char)tbuf[2], (unsigned char)tbuf[3]);
+                    ssize_t nr_final = read(jfd, rbuf, 4096);
+                    int re_final = errno;
+                    klog_printf("[READ_AFTER_IOCTL] nr=%zd errno=%d first16=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                nr_final, re_final,
+                                rbuf[0],rbuf[1],rbuf[2],rbuf[3], rbuf[4],rbuf[5],rbuf[6],rbuf[7],
+                                rbuf[8],rbuf[9],rbuf[10],rbuf[11], rbuf[12],rbuf[13],rbuf[14],rbuf[15]);
 
                     close(jfd);
                 }
