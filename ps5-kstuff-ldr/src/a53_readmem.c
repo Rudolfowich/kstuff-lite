@@ -1637,6 +1637,92 @@ dopen_jmp_done: ;
     }
 
     /* ------------------------------------------------------------------------- */
+    /* DECI_WAIT_PROBE: снимаем тело функции mp4_dump_for_decid_wait_for_deci5s  */
+    /* и читаем 2 глобала, которые она polls (найдено offline в kdump).         */
+    /* Offsets от kbase:                                                        */
+    /*   func   = kbase - 0x9d840                                               */
+    /*   g1_ptr = kbase + 0x312eb58  (qword ptr, разыменовывается в начале)     */
+    /*   g2_u32 = kbase + 0x2c60440  (dword счётчик)                            */
+    /* ------------------------------------------------------------------------- */
+    {
+        uint64_t probe_kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+        if (probe_kbase > 0xffffffff00000000ULL) {
+            uint64_t func_va = probe_kbase - 0x9d840ULL;
+            uint64_t g1_va   = probe_kbase + 0x312eb58ULL;
+            uint64_t g2_va   = probe_kbase + 0x2c60440ULL;
+
+            klog_printf("[DECI_WAIT] kbase=0x%llx  func=0x%llx  g1=0x%llx  g2=0x%llx\n",
+                        (unsigned long long)probe_kbase,
+                        (unsigned long long)func_va,
+                        (unsigned long long)g1_va,
+                        (unsigned long long)g2_va);
+
+            /* Сначала читаем глобалы (быстро) — они информативнее всего */
+            uint64_t g1_val = 0;
+            long gr1 = kekcall(KEKCALL_DUMP_MEM, g1_va, (uintptr_t)&g1_val, 8);
+            uint32_t g2_val = 0;
+            long gr2 = kekcall(KEKCALL_DUMP_MEM, g2_va, (uintptr_t)&g2_val, 4);
+            klog_printf("[DECI_WAIT] GLOBAL1 ret=%ld val=0x%016llx\n",
+                        gr1, (unsigned long long)g1_val);
+            klog_printf("[DECI_WAIT] GLOBAL2 ret=%ld val=0x%08x\n", gr2, g2_val);
+
+            /* Если GLOBAL1 указывает в ядро — разыменовываем +0..+0x100 и +0x880 */
+            if ((g1_val >> 48) == 0xffff && g1_val >= 0xffff800000000000ULL) {
+                static uint8_t g1buf[256];
+                memset(g1buf, 0, sizeof(g1buf));
+                long gd = kekcall(KEKCALL_DUMP_MEM, g1_val, (uintptr_t)g1buf, sizeof(g1buf));
+                klog_printf("[DECI_WAIT] *g1 dump ret=%ld\n", gd);
+                for (int row = 0; row < 256; row += 16) {
+                    klog_printf("[*G1+%03x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                row,
+                                g1buf[row+0],g1buf[row+1],g1buf[row+2],g1buf[row+3],
+                                g1buf[row+4],g1buf[row+5],g1buf[row+6],g1buf[row+7],
+                                g1buf[row+8],g1buf[row+9],g1buf[row+10],g1buf[row+11],
+                                g1buf[row+12],g1buf[row+13],g1buf[row+14],g1buf[row+15]);
+                }
+                /* Функция затем делает lea rdi, [r15+0x880] — поле на оффсете 0x880 */
+                static uint8_t g1sub[128];
+                memset(g1sub, 0, sizeof(g1sub));
+                long gd2 = kekcall(KEKCALL_DUMP_MEM, g1_val + 0x880ULL,
+                                   (uintptr_t)g1sub, sizeof(g1sub));
+                klog_printf("[DECI_WAIT] *(g1+0x880) ret=%ld\n", gd2);
+                for (int row = 0; row < 128; row += 16) {
+                    klog_printf("[*G1+880+%03x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                row,
+                                g1sub[row+0],g1sub[row+1],g1sub[row+2],g1sub[row+3],
+                                g1sub[row+4],g1sub[row+5],g1sub[row+6],g1sub[row+7],
+                                g1sub[row+8],g1sub[row+9],g1sub[row+10],g1sub[row+11],
+                                g1sub[row+12],g1sub[row+13],g1sub[row+14],g1sub[row+15]);
+                }
+            } else {
+                klog_printf("[DECI_WAIT] GLOBAL1 is NULL/non-kernel — handler would hang waiting for deci\n");
+            }
+
+            /* Теперь полное тело функции — 2 KB хватит на весь poll-loop */
+            static uint8_t fbody[2048];
+            memset(fbody, 0, sizeof(fbody));
+            long fr = kekcall(KEKCALL_DUMP_MEM, func_va, (uintptr_t)fbody, sizeof(fbody));
+            klog_printf("[DECI_WAIT] func body dump ret=%ld (2 KB from 0x%llx)\n",
+                        fr, (unsigned long long)func_va);
+            for (int row = 0; row < 2048; row += 32) {
+                klog_printf("[FBODY+%04x] %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                            row,
+                            fbody[row+0],fbody[row+1],fbody[row+2],fbody[row+3],
+                            fbody[row+4],fbody[row+5],fbody[row+6],fbody[row+7],
+                            fbody[row+8],fbody[row+9],fbody[row+10],fbody[row+11],
+                            fbody[row+12],fbody[row+13],fbody[row+14],fbody[row+15],
+                            fbody[row+16],fbody[row+17],fbody[row+18],fbody[row+19],
+                            fbody[row+20],fbody[row+21],fbody[row+22],fbody[row+23],
+                            fbody[row+24],fbody[row+25],fbody[row+26],fbody[row+27],
+                            fbody[row+28],fbody[row+29],fbody[row+30],fbody[row+31]);
+            }
+        } else {
+            klog_printf("[DECI_WAIT] kbase invalid (0x%llx) — skip\n",
+                        (unsigned long long)probe_kbase);
+        }
+    }
+
+    /* ------------------------------------------------------------------------- */
     /* ДЕКОДИРОВАНИЕ TRAMPOLINE И ДАМП РЕАЛЬНОГО .text ДЛЯ d_write, d_ioctl, etc */
     /* ------------------------------------------------------------------------- */
     if (dedicated_mp4_csw) {
