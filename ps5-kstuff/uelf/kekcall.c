@@ -1217,27 +1217,8 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
     }
     else if(nr == 36)
     {
-        /* CALL_DOPEN_DIRECT:
-         * Прямой вызов d_open из ring 0 ядра.
-         * args[RDI] = d_open_fn (uint64_t)
-         * args[RSI] = cdev (uint64_t)
-         * args[RDX] = oflags (uint64_t)
-         * args[R8]  = td_mode (0 = curthread, 1 = NULL)
-         * regs[RDI] = curthread */
-        typedef int (*dopen_fn_t)(uint64_t cdev, int oflags, int devtype, uint64_t td);
-        dopen_fn_t fn = (dopen_fn_t)args[RDI];
-        uint64_t cdev = args[RSI];
-        int oflags    = (int)args[RDX];
-        int td_mode   = (int)args[R8];
-        uint64_t td   = regs[RDI];
-
-        if (!fn || !cdev) return EINVAL;
-
-        uint64_t call_td = td;
-        if (td_mode == 1) call_td = 0;
-
-        int ret = fn(cdev, oflags, 0x2000 /* S_IFCHR */, call_td);
-        args[RAX] = (uint64_t)ret;
+        /* CALL_DOPEN_DIRECT - disabled for safety */
+        args[RAX] = (uint64_t)ENODEV;
         return 0;
     }
     else if(nr == 0xffffffff)
