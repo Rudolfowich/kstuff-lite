@@ -1272,8 +1272,27 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
             /* Проверенная структура PS5 Prospero fdt:
              * header = 0x10, stride = 0x08 (плоский массив struct file*)
              */
-            kpeek64_checked(found_fd_files + 0x10ULL + (uint64_t)target_fd_mp4 * 8ULL, &found_fp_mp4);
-            kpeek64_checked(found_fd_files + 0x10ULL + (uint64_t)target_fd_null * 8ULL, &found_fp_null);
+            uint64_t cand_m = 0, cand_n = 0;
+            kpeek64_checked(found_fd_files + 0x10ULL + (uint64_t)target_fd_mp4 * 8ULL, &cand_m);
+            kpeek64_checked(found_fd_files + 0x10ULL + (uint64_t)target_fd_null * 8ULL, &cand_n);
+
+            /* Если целевой слот пуст, ищем ближайший ненулевой указатель кучи в диапазоне fd +/- 2 */
+            if ((cand_m >> 48) != 0xffff) {
+                int deltas[] = { 1, -1, 2, -2 };
+                for (int d = 0; d < 4; d++) {
+                    int try_fd = target_fd_mp4 + deltas[d];
+                    if (try_fd < 0 || try_fd > 32) continue;
+                    uint64_t try_fp = 0;
+                    kpeek64_checked(found_fd_files + 0x10ULL + (uint64_t)try_fd * 8ULL, &try_fp);
+                    if ((try_fp >> 48) == 0xffff && (try_fp >> 40) != 0xffffff && try_fp != cand_n) {
+                        cand_m = try_fp;
+                        break;
+                    }
+                }
+            }
+
+            found_fp_mp4 = cand_m;
+            found_fp_null = cand_n;
         }
 
         if (user_buf) {
