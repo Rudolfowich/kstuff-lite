@@ -1529,6 +1529,78 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                 if (jfd >= 0) {
                     klog_printf("[DOPEN_JMP_OPEN] *** SUCCESS *** opened mp4/dump_for_decid with legitimate init!\n");
 
+                    /* ---- MP4_DUMP: try the sibling /dev/mp4/dump (not _for_decid).
+                     * same csw, patched d_open path → should also open now.
+                     * Это и есть реальный SDBGP/DECI5S transport для A53 PPR mailbox. */
+                    errno = 0;
+                    int md_fd = open("/dev/mp4/dump", O_RDWR);
+                    int md_err = errno;
+                    klog_printf("[MP4_DUMP_OPEN] O_RDWR fd=%d errno=%d\n", md_fd, md_err);
+                    if (md_fd < 0) {
+                        errno = 0;
+                        md_fd = open("/dev/mp4/dump", O_RDONLY);
+                        md_err = errno;
+                        klog_printf("[MP4_DUMP_OPEN] O_RDONLY fd=%d errno=%d\n", md_fd, md_err);
+                    }
+                    if (md_fd >= 0) {
+                        klog_printf("[MP4_DUMP_OPEN] *** SUCCESS *** /dev/mp4/dump opened (fd=%d)\n", md_fd);
+                        /* Try all 6 ioctl cmds on this device. The handler is in the
+                         * same cdevsw, so same cmd numbers should work. Softc is per-cdev. */
+                        {
+                            uint8_t a[20] = {0};
+                            errno = 0;
+                            int r = ioctl(md_fd, 0x4014421c, a);
+                            int e = errno;
+                            klog_printf("[MDUMP_B28] ret=%d errno=%d out20=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                        r, e,
+                                        a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],
+                                        a[8],a[9],a[10],a[11],a[12],a[13],a[14],a[15],
+                                        a[16],a[17],a[18],a[19]);
+                        }
+                        {
+                            uint8_t a[8] = {0};
+                            errno = 0;
+                            int r = ioctl(md_fd, 0x4008421f, a);
+                            klog_printf("[MDUMP_B31] ret=%d errno=%d out8=%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                        r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7]);
+                        }
+                        {
+                            uint8_t a[8] = {0};
+                            errno = 0;
+                            int r = ioctl(md_fd, 0x40084220, a);
+                            klog_printf("[MDUMP_B32] ret=%d errno=%d out8=%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                        r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7]);
+                        }
+                        {
+                            uint32_t b[5] = {0x14, 0, 0, 0, 0};
+                            errno = 0;
+                            int r = ioctl(md_fd, 0xc014420b, b);
+                            klog_printf("[MDUMP_B11] ret=%d errno=%d out=0x%08x 0x%08x 0x%08x 0x%08x 0x%08x\n",
+                                        r, errno, b[0],b[1],b[2],b[3],b[4]);
+                        }
+                        /* Also try read + write (SDBGP transport uses both) */
+                        {
+                            static uint8_t rb[256];
+                            memset(rb, 0, sizeof(rb));
+                            errno = 0;
+                            ssize_t nr = read(md_fd, rb, 256);
+                            klog_printf("[MDUMP_READ] nr=%zd errno=%d first16=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                        nr, errno,
+                                        rb[0],rb[1],rb[2],rb[3],rb[4],rb[5],rb[6],rb[7],
+                                        rb[8],rb[9],rb[10],rb[11],rb[12],rb[13],rb[14],rb[15]);
+                        }
+                        {
+                            uint8_t wb[32];
+                            memset(wb, 0xAB, sizeof(wb));
+                            errno = 0;
+                            ssize_t nw = write(md_fd, wb, 32);
+                            klog_printf("[MDUMP_WRITE] nw=%zd errno=%d\n", nw, errno);
+                        }
+                        close(md_fd);
+                        klog_printf("[MP4_DUMP_OPEN] closed fd\n");
+                    }
+                    /* ----------------- end MP4_DUMP probe --------------------- */
+
                     /* d_write — это заглушка (b8 13 00 00 00 c3 = mov eax, ENODEV; ret),
                      * write в этот device не предусмотрен. Это dump-only identifier
                      * channel. Пробуем read разных размеров и ioctl для trigger'а. */
