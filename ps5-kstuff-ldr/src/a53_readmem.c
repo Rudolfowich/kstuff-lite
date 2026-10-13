@@ -413,6 +413,7 @@ static uint64_t g_cdev_deci_mp4_ioc = 0;
 static uint64_t g_cdev_deci_mp4_mmc = 0;
 static uint64_t g_cdev_deci_coredump = 0;
 static uint64_t g_cdev_mp4_dump_for_decid = 0;
+static uint64_t g_cdev_mp4_dump = 0;
 
 int
 scan_cdevsw(void)
@@ -1569,6 +1570,44 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                             klog_printf("[MP4_DUMP_LS] opendir failed errno=%d\n", errno);
                         }
                     }
+                    /* Scan heap for mp4/dump cdev — walker missed it (dedup by csw) */
+                    if (dedicated_mp4_cdev) {
+                        uint64_t scan_start = (dedicated_mp4_cdev - 0x80000ULL) & ~0xffULL;
+                        uint64_t scan_end   = dedicated_mp4_cdev + 0x80000ULL;
+                        klog_printf("[CDEV_SCAN] scanning 0x%llx .. 0x%llx for 'mp4/dump\\0' at +0xe0\n",
+                                    (unsigned long long)scan_start, (unsigned long long)scan_end);
+                        int found = 0;
+                        for (uint64_t p = scan_start; p < scan_end && found < 4; p += 0x100) {
+                            uint8_t nb[16] = {0};
+                            long dr = kekcall(KEKCALL_DUMP_MEM, p + 0xe0ULL, (uintptr_t)nb, 16);
+                            if (dr != 16) continue;
+                            if (nb[0]=='m' && nb[1]=='p' && nb[2]=='4' && nb[3]=='/' &&
+                                nb[4]=='d' && nb[5]=='u' && nb[6]=='m' && nb[7]=='p' &&
+                                (nb[8]==0 || nb[8]=='_')) {
+                                char name[16] = {0};
+                                memcpy(name, nb, 15);
+                                klog_printf("[CDEV_SCAN] cdev @ 0x%llx name='%s'\n",
+                                            (unsigned long long)p, name);
+                                found++;
+                                /* dump cdev struct 0x200 bytes */
+                                uint64_t cfields[4] = {0};
+                                kekcall(KEKCALL_DUMP_MEM, p + 0x80ULL, (uintptr_t)cfields, 32);
+                                klog_printf("[CDEV_SCAN]   +0x80=0x%llx (si_devsw?) +0x88=0x%llx +0x90=0x%llx +0x98=0x%llx\n",
+                                            (unsigned long long)cfields[0],
+                                            (unsigned long long)cfields[1],
+                                            (unsigned long long)cfields[2],
+                                            (unsigned long long)cfields[3]);
+                                /* If this is mp4/dump (not _for_decid), save it */
+                                if (nb[8] == 0 && !g_cdev_mp4_dump) {
+                                    g_cdev_mp4_dump = p;
+                                    klog_printf("[CDEV_SCAN] *** FOUND mp4/dump cdev @ 0x%llx ***\n",
+                                                (unsigned long long)p);
+                                }
+                            }
+                        }
+                        klog_printf("[CDEV_SCAN] done, found %d mp4 cdevs\n", found);
+                    }
+
                     /* Try test6's recipe: revoke() first then open() */
                     errno = 0;
                     int rv = syscall(56, "/dev/mp4/dump");  // SYS_revoke
