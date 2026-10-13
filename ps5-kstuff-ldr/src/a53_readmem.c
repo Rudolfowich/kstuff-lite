@@ -1028,6 +1028,53 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     klog_printf("[STEP1] /dev/mp4/dump pre-patch: fd=%d errno=%d\n", fd0, err0);
     if (fd0 >= 0) {
         klog_printf("[STEP1] *** VICTORY: /dev/mp4/dump OPENED WITHOUT NEW PATCH! fd=%d ***\n", fd0);
+        /* RPC pre-patch is active. Probe all 6 ioctl cmds. */
+        {
+            uint8_t a[20] = {0};
+            errno = 0;
+            int r = ioctl(fd0, 0x4014421c, a);
+            klog_printf("[S1_B28] ret=%d errno=%d out20=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                        r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],
+                        a[8],a[9],a[10],a[11],a[12],a[13],a[14],a[15],
+                        a[16],a[17],a[18],a[19]);
+        }
+        {
+            uint8_t a[8] = {0};
+            errno = 0;
+            int r = ioctl(fd0, 0x4008421f, a);
+            klog_printf("[S1_B31] ret=%d errno=%d out8=%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                        r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7]);
+        }
+        {
+            uint8_t a[8] = {0};
+            errno = 0;
+            int r = ioctl(fd0, 0x40084220, a);
+            klog_printf("[S1_B32] ret=%d errno=%d out8=%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                        r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7]);
+        }
+        {
+            uint32_t b[5] = {0x14, 0, 0, 0, 0};
+            errno = 0;
+            int r = ioctl(fd0, 0xc014420b, b);
+            klog_printf("[S1_B11] ret=%d errno=%d out=0x%08x 0x%08x 0x%08x 0x%08x 0x%08x\n",
+                        r, errno, b[0],b[1],b[2],b[3],b[4]);
+        }
+        {
+            uint32_t b[5] = {0x14, 0, 0, 0, 0};
+            errno = 0;
+            int r = ioctl(fd0, 0xc0144215, b);
+            klog_printf("[S1_B21] ret=%d errno=%d out=0x%08x 0x%08x 0x%08x 0x%08x 0x%08x\n",
+                        r, errno, b[0],b[1],b[2],b[3],b[4]);
+        }
+        {
+            uint8_t rbuf[256] = {0};
+            errno = 0;
+            ssize_t nr = read(fd0, rbuf, 256);
+            klog_printf("[S1_READ] nr=%zd errno=%d first16=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                        nr, errno,
+                        rbuf[0],rbuf[1],rbuf[2],rbuf[3],rbuf[4],rbuf[5],rbuf[6],rbuf[7],
+                        rbuf[8],rbuf[9],rbuf[10],rbuf[11],rbuf[12],rbuf[13],rbuf[14],rbuf[15]);
+        }
         close(fd0);
         return 0;
     }
@@ -1775,6 +1822,26 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                                             wr2, (unsigned long long)rb2,
                                             (rb2 == md_patch2_val) ? "OK" : "FAIL");
                                 if (rb2 == md_patch2_val) {
+                                    /* Clear softc +0x7f0 (open-lock flag) and +0x4e0 (state).
+                                     * Prior kills may have left these set, blocking open with EMFILE. */
+                                    uint64_t md_softc = 0;
+                                    kekcall(KEKCALL_DUMP_MEM, g_cdev_mp4_dump + 0xa8ULL,
+                                            (uintptr_t)&md_softc, 8);
+                                    klog_printf("[MP4_DUMP_SOFTC] si_drv1=0x%llx\n",
+                                                (unsigned long long)md_softc);
+                                    if ((md_softc >> 48) == 0xffff) {
+                                        uint64_t pre_7f0 = 0, pre_4e0 = 0;
+                                        kekcall(KEKCALL_DUMP_MEM, md_softc + 0x7f0ULL,
+                                                (uintptr_t)&pre_7f0, 8);
+                                        kekcall(KEKCALL_DUMP_MEM, md_softc + 0x4e0ULL,
+                                                (uintptr_t)&pre_4e0, 8);
+                                        klog_printf("[MP4_DUMP_SOFTC] pre softc[+0x7f0]=0x%llx [+0x4e0]=0x%llx\n",
+                                                    (unsigned long long)pre_7f0,
+                                                    (unsigned long long)pre_4e0);
+                                        kekcall(27, md_softc + 0x7f0ULL, 0ULL, 0);
+                                        kekcall(27, md_softc + 0x4e0ULL, 0ULL, 0);
+                                        klog_printf("[MP4_DUMP_SOFTC] cleared +0x7f0 and +0x4e0\n");
+                                    }
                                     errno = 0;
                                     md_fd = open("/dev/mp4/dump", O_RDWR);
                                     klog_printf("[MP4_DUMP_OPEN3] after je→jne patch O_RDWR fd=%d errno=%d\n",
