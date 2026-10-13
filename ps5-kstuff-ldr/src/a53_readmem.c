@@ -1651,11 +1651,37 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                         klog_printf("[MP4_DUMP_OPEN] O_PATH-ish fd=%d errno=%d\n", md_fd, errno);
                     }
                     if (md_fd < 0 && g_cdev_mp4_dump) {
-                        /* mp4/dump has own csw. Read it from cdev+0x68 (si_devsw). */
+                        /* Try each candidate kernel-ptr field for si_devsw.
+                         * Dump 32 bytes at each, cdevsw usually has d_open
+                         * (kernel .text ptr) at +0x10. */
+                        uint64_t cands[3];
+                        kekcall(KEKCALL_DUMP_MEM, g_cdev_mp4_dump + 0x68ULL, (uintptr_t)&cands[0], 8);
+                        kekcall(KEKCALL_DUMP_MEM, g_cdev_mp4_dump + 0xb0ULL, (uintptr_t)&cands[1], 8);
+                        kekcall(KEKCALL_DUMP_MEM, g_cdev_mp4_dump + 0xb8ULL, (uintptr_t)&cands[2], 8);
+                        klog_printf("[MP4_DUMP_CSW] candidates: +0x68=0x%llx +0xb0=0x%llx +0xb8=0x%llx\n",
+                                    (unsigned long long)cands[0],
+                                    (unsigned long long)cands[1],
+                                    (unsigned long long)cands[2]);
                         uint64_t md_csw = 0;
-                        kekcall(KEKCALL_DUMP_MEM, g_cdev_mp4_dump + 0x68ULL,
-                                (uintptr_t)&md_csw, 8);
-                        klog_printf("[MP4_DUMP_CSW] from cdev+0x68: 0x%llx\n",
+                        for (int ci = 0; ci < 3; ci++) {
+                            uint64_t v = cands[ci];
+                            if ((v >> 48) != 0xffff) continue;
+                            uint64_t cf[4] = {0};
+                            kekcall(KEKCALL_DUMP_MEM, v, (uintptr_t)cf, 32);
+                            klog_printf("[MP4_DUMP_CSW] cand[%d]=0x%llx fields: +0=0x%llx +8=0x%llx +10=0x%llx +18=0x%llx\n",
+                                        ci, (unsigned long long)v,
+                                        (unsigned long long)cf[0],
+                                        (unsigned long long)cf[1],
+                                        (unsigned long long)cf[2],
+                                        (unsigned long long)cf[3]);
+                            /* +0x10 of a real cdevsw is d_open (kernel .text ptr) */
+                            if ((cf[2] >> 48) == 0xffff && cf[2] >= 0xffff800000000000ULL) {
+                                klog_printf("[MP4_DUMP_CSW] cand[%d] LOOKS LIKE cdevsw (d_open=0x%llx)\n",
+                                            ci, (unsigned long long)cf[2]);
+                                if (!md_csw) md_csw = v;
+                            }
+                        }
+                        klog_printf("[MP4_DUMP_CSW] chosen csw: 0x%llx\n",
                                     (unsigned long long)md_csw);
                         if (!md_csw) goto skip_md_patch;
                         {
