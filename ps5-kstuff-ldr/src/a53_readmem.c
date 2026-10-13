@@ -1686,6 +1686,88 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                     }
 
                     /* -----------------------------------------------------------
+                     * B_11_LEGIT: пробуем ioctl B_11 с корректным форматом,
+                     * выведенным из offline reverse d_ioctl:
+                     *   buf[0..3] = 0x14 (= 20, видимо size tag)
+                     *   buf[8..11] = 0
+                     * Иначе handler уходит в error path с ret=-1.
+                     * Если handler не висит — он может естественным образом
+                     * заполнить softc +0x858/+0x868/+0x870/+0x880 identifier'ом.
+                     * ВНИМАНИЕ: может повиснуть на deci wait — тогда klog
+                     * оборвётся на "firing" строке и процесс станет zombie.
+                     * ----------------------------------------------------------- */
+                    {
+                        uint64_t b11_kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+                        uint64_t b11_g1 = 0;
+                        if (b11_kbase > 0xffffffff00000000ULL) {
+                            kekcall(KEKCALL_DUMP_MEM, b11_kbase + 0x312eb58ULL,
+                                    (uintptr_t)&b11_g1, 8);
+                        }
+                        /* Pre-state snapshot */
+                        uint64_t pre_858 = 0, pre_868 = 0, pre_870 = 0, pre_878 = 0;
+                        if ((b11_g1 >> 48) == 0xffff && b11_g1 >= 0xffff800000000000ULL) {
+                            kekcall(KEKCALL_DUMP_MEM, b11_g1 + 0x858ULL, (uintptr_t)&pre_858, 8);
+                            kekcall(KEKCALL_DUMP_MEM, b11_g1 + 0x868ULL, (uintptr_t)&pre_868, 8);
+                            kekcall(KEKCALL_DUMP_MEM, b11_g1 + 0x870ULL, (uintptr_t)&pre_870, 8);
+                            kekcall(KEKCALL_DUMP_MEM, b11_g1 + 0x878ULL, (uintptr_t)&pre_878, 8);
+                            klog_printf("[B11_PRE] softc[+858/+868/+870/+878]=0x%llx 0x%llx 0x%llx 0x%llx\n",
+                                        (unsigned long long)pre_858,
+                                        (unsigned long long)pre_868,
+                                        (unsigned long long)pre_870,
+                                        (unsigned long long)pre_878);
+                        }
+                        uint32_t b11buf[5] = { 0x14, 0, 0, 0, 0 };
+                        klog_printf("[B11_FIRE] cmd=0xc014420b buf=[20,0,0,0,0] — if HANG klog stops here\n");
+                        errno = 0;
+                        int b11r = ioctl(jfd, 0xc014420b, b11buf);
+                        int b11e = errno;
+                        klog_printf("[B11_RET] ret=%d errno=%d outbuf=0x%08x 0x%08x 0x%08x 0x%08x 0x%08x\n",
+                                    b11r, b11e,
+                                    b11buf[0], b11buf[1], b11buf[2], b11buf[3], b11buf[4]);
+                        /* Post-state snapshot */
+                        if ((b11_g1 >> 48) == 0xffff && b11_g1 >= 0xffff800000000000ULL) {
+                            uint64_t p_858 = 0, p_868 = 0, p_870 = 0, p_878 = 0;
+                            kekcall(KEKCALL_DUMP_MEM, b11_g1 + 0x858ULL, (uintptr_t)&p_858, 8);
+                            kekcall(KEKCALL_DUMP_MEM, b11_g1 + 0x868ULL, (uintptr_t)&p_868, 8);
+                            kekcall(KEKCALL_DUMP_MEM, b11_g1 + 0x870ULL, (uintptr_t)&p_870, 8);
+                            kekcall(KEKCALL_DUMP_MEM, b11_g1 + 0x878ULL, (uintptr_t)&p_878, 8);
+                            klog_printf("[B11_POST] softc[+858/+868/+870/+878]=0x%llx 0x%llx 0x%llx 0x%llx\n",
+                                        (unsigned long long)p_858,
+                                        (unsigned long long)p_868,
+                                        (unsigned long long)p_870,
+                                        (unsigned long long)p_878);
+                            /* Dump +0x880 — вдруг B_11 положил туда identifier */
+                            static uint8_t b880[128];
+                            memset(b880, 0, sizeof(b880));
+                            kekcall(KEKCALL_DUMP_MEM, b11_g1 + 0x880ULL, (uintptr_t)b880, sizeof(b880));
+                            klog_printf("[B11_POST] +0x880 after B_11:\n");
+                            for (int row = 0; row < 128; row += 16) {
+                                klog_printf("[B11_880+%03x] %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                            row,
+                                            b880[row+0], b880[row+1], b880[row+2], b880[row+3],
+                                            b880[row+4], b880[row+5], b880[row+6], b880[row+7]);
+                            }
+                            /* If B_11 natively populated +0x858/+0x868, try plain read */
+                            if (p_858 != 0 && p_868 > p_870) {
+                                static uint8_t rnat[256];
+                                memset(rnat, 0, sizeof(rnat));
+                                errno = 0;
+                                ssize_t nrn = read(jfd, rnat, sizeof(rnat));
+                                int rne = errno;
+                                klog_printf("[B11_NATREAD] nr=%zd errno=%d\n", nrn, rne);
+                                if (nrn > 0) {
+                                    for (int row = 0; row < (int)nrn && row < 128; row += 16) {
+                                        klog_printf("[B11_NR+%03x] %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                                    row,
+                                                    rnat[row+0], rnat[row+1], rnat[row+2], rnat[row+3],
+                                                    rnat[row+4], rnat[row+5], rnat[row+6], rnat[row+7]);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    /* -----------------------------------------------------------
                      * READ_HIJACK: из offline reverse d_read'а знаем, что он
                      * читает softc[0x870]..softc[0x868] откуда [0x858]+cursor.
                      * Снимаем текущие значения, затем ставим base=&softc[+0x880]
