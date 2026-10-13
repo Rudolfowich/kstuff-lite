@@ -1602,6 +1602,22 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                                     g_cdev_mp4_dump = p;
                                     klog_printf("[CDEV_SCAN] *** FOUND mp4/dump cdev @ 0x%llx ***\n",
                                                 (unsigned long long)p);
+                                    /* Dump 0x200 bytes to find si_devsw */
+                                    static uint8_t cd[0x200];
+                                    memset(cd, 0, sizeof(cd));
+                                    kekcall(KEKCALL_DUMP_MEM, p, (uintptr_t)cd, sizeof(cd));
+                                    for (int row = 0; row < 0x200; row += 32) {
+                                        klog_printf("[CDEV_FULL+%03x] %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                                    row,
+                                                    cd[row+0],cd[row+1],cd[row+2],cd[row+3],
+                                                    cd[row+4],cd[row+5],cd[row+6],cd[row+7],
+                                                    cd[row+8],cd[row+9],cd[row+10],cd[row+11],
+                                                    cd[row+12],cd[row+13],cd[row+14],cd[row+15],
+                                                    cd[row+16],cd[row+17],cd[row+18],cd[row+19],
+                                                    cd[row+20],cd[row+21],cd[row+22],cd[row+23],
+                                                    cd[row+24],cd[row+25],cd[row+26],cd[row+27],
+                                                    cd[row+28],cd[row+29],cd[row+30],cd[row+31]);
+                                    }
                                 }
                             }
                         }
