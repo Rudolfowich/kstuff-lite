@@ -1107,70 +1107,61 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         int fd_ioc = open("/dev/deci_mp4_ioc", O_RDWR);
         klog_printf("[FILE_TEST] opened fds: fd_mp4=%d fd_ioc=%d\n", fd_mp4, fd_ioc);
 
-        /* Достаем надежный адрес my_td и curproc */
-        uint64_t ext_c[4] = {0};
-        kekcall(KEKCALL_EXT_DUMP, 0, (uintptr_t)ext_c, sizeof(ext_c));
-        uint64_t my_td = ext_c[1];
-        uint64_t my_curproc = 0;
-        if (my_td) kekcall(KEKCALL_DUMP_MEM, my_td + 0x08ULL, (uintptr_t)&my_curproc, 8);
-
-        klog_printf("[FILE_TEST] my_td=0x%llx my_curproc=0x%llx\n",
-                    (unsigned long long)my_td, (unsigned long long)my_curproc);
-
-        /* Ищем p_fd в curproc (+0x38..+0x60) */
+        /* Надежный curproc и p_fd:
+         * scanned_proc получен из KEKCALL_SCAN_TD_UCRED ранее (смещение p_fd = +0x48) */
+        uint64_t my_curproc = scanned_proc;
         uint64_t p_fd = 0;
-        uint32_t p_fd_off = 0;
         if (my_curproc) {
-            for (uint32_t po = 0x38; po <= 0x60; po += 8) {
-                uint64_t ptr = 0;
-                kekcall(KEKCALL_DUMP_MEM, my_curproc + po, (uintptr_t)&ptr, 8);
-                if ((ptr >> 48) == 0xffff) {
-                    /* Читаем заголовок filedesc: первые 32 байта */
-                    uint64_t fdt_hdr[4] = {0};
-                    kekcall(KEKCALL_DUMP_MEM, ptr, (uintptr_t)fdt_hdr, sizeof(fdt_hdr));
-                    /* fdt_files / fdt_ofiles - указатель на массив */
-                    if ((fdt_hdr[0] >> 48) == 0xffff || (fdt_hdr[1] >> 48) == 0xffff) {
-                        p_fd = ptr;
-                        p_fd_off = po;
-                        klog_printf("[FILE_TEST] p_fd candidate at +0x%x: [0]=0x%llx [1]=0x%llx\n",
-                                    po, (unsigned long long)fdt_hdr[0], (unsigned long long)fdt_hdr[1]);
-                        break;
-                    }
-                }
-            }
+            kekcall(KEKCALL_DUMP_MEM, my_curproc + 0x48ULL, (uintptr_t)&p_fd, 8);
         }
-        klog_printf("[FILE_TEST] selected p_fd=0x%llx at proc+0x%x\n",
-                    (unsigned long long)p_fd, p_fd_off);
+        klog_printf("[FILE_TEST] my_curproc=0x%llx p_fd=0x%llx\n",
+                    (unsigned long long)my_curproc, (unsigned long long)p_fd);
 
         uint64_t fp_mp4 = 0, fp_ioc = 0;
         if (p_fd && fd_mp4 >= 0) {
-            /* Во FreeBSD 12 fdt_files лежит на +0x00 или +0x08 */
-            uint64_t fdt_ptr = 0;
-            kekcall(KEKCALL_DUMP_MEM, p_fd, (uintptr_t)&fdt_ptr, 8);
-            if ((fdt_ptr >> 48) != 0xffff) {
-                kekcall(KEKCALL_DUMP_MEM, p_fd + 0x08ULL, (uintptr_t)&fdt_ptr, 8);
-            }
+            uint64_t fd_ofiles = 0;
+            kekcall(KEKCALL_DUMP_MEM, p_fd + 0x08ULL, (uintptr_t)&fd_ofiles, 8);
+            klog_printf("[FILE_TEST] fd_ofiles=0x%llx\n", (unsigned long long)fd_ofiles);
 
-            /* Если fdt_ptr это fdescent table (stride 16 байт) */
-            if ((fdt_ptr >> 48) == 0xffff) {
-                uint64_t fde[32] = {0};
-                kekcall(KEKCALL_DUMP_MEM, fdt_ptr, (uintptr_t)fde, sizeof(fde));
-                fp_mp4 = fde[fd_mp4 * 2];
-                if (fd_ioc >= 0) fp_ioc = fde[fd_ioc * 2];
-                klog_printf("[FILE_TEST] via fdt_ptr=0x%llx: fp_mp4=0x%llx fp_ioc=0x%llx\n",
-                            (unsigned long long)fdt_ptr, (unsigned long long)fp_mp4, (unsigned long long)fp_ioc);
-            }
-            if (!fp_mp4) {
-                /* Попробуем прямой массив в p_fd */
-                uint64_t fde[32] = {0};
-                kekcall(KEKCALL_DUMP_MEM, p_fd, (uintptr_t)fde, sizeof(fde));
-                fp_mp4 = fde[fd_mp4];
-                if (fd_ioc >= 0) fp_ioc = fde[fd_ioc];
-                klog_printf("[FILE_TEST] via direct p_fd: fp_mp4=0x%llx fp_ioc=0x%llx\n",
-                            (unsigned long long)fp_mp4, (unsigned long long)fp_ioc);
+            if ((fd_ofiles >> 48) == 0xffff) {
+                /* Во FreeBSD 12 / PS5 ofiles - это массив struct fdescent (size 0x20 или 0x30)
+                 * Пробуем strides 0x20, 0x18, 0x10 */
+                uint64_t candidates_mp4[4] = {0};
+                kekcall(KEKCALL_DUMP_MEM, fd_ofiles + (uint64_t)fd_mp4 * 0x20ULL, (uintptr_t)&candidates_mp4[0], 8);
+                kekcall(KEKCALL_DUMP_MEM, fd_ofiles + (uint64_t)fd_mp4 * 0x18ULL, (uintptr_t)&candidates_mp4[1], 8);
+                kekcall(KEKCALL_DUMP_MEM, fd_ofiles + (uint64_t)fd_mp4 * 0x10ULL, (uintptr_t)&candidates_mp4[2], 8);
+                kekcall(KEKCALL_DUMP_MEM, fd_ofiles + (uint64_t)fd_mp4 * 0x08ULL, (uintptr_t)&candidates_mp4[3], 8);
+
+                klog_printf("[FILE_TEST] stride probes mp4(fd=%d): 0x20:0x%llx 0x18:0x%llx 0x10:0x%llx 0x08:0x%llx\n",
+                            fd_mp4,
+                            (unsigned long long)candidates_mp4[0],
+                            (unsigned long long)candidates_mp4[1],
+                            (unsigned long long)candidates_mp4[2],
+                            (unsigned long long)candidates_mp4[3]);
+
+                uint32_t chosen_stride = 0x20;
+                if ((candidates_mp4[0] >> 48) == 0xffff) {
+                    fp_mp4 = candidates_mp4[0];
+                    chosen_stride = 0x20;
+                } else if ((candidates_mp4[1] >> 48) == 0xffff) {
+                    fp_mp4 = candidates_mp4[1];
+                    chosen_stride = 0x18;
+                } else if ((candidates_mp4[2] >> 48) == 0xffff) {
+                    fp_mp4 = candidates_mp4[2];
+                    chosen_stride = 0x10;
+                } else if ((candidates_mp4[3] >> 48) == 0xffff) {
+                    fp_mp4 = candidates_mp4[3];
+                    chosen_stride = 0x08;
+                }
+
+                if (fd_ioc >= 0 && chosen_stride) {
+                    kekcall(KEKCALL_DUMP_MEM, fd_ofiles + (uint64_t)fd_ioc * (uint64_t)chosen_stride, (uintptr_t)&fp_ioc, 8);
+                }
+
+                klog_printf("[FILE_TEST] resolved fp_mp4=0x%llx fp_ioc=0x%llx (stride=0x%x)\n",
+                            (unsigned long long)fp_mp4, (unsigned long long)fp_ioc, chosen_stride);
             }
         }
-
 
         /* Дамп и diff 256 байт struct file */
         if (fp_mp4) {
@@ -1180,7 +1171,7 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
             if (fp_ioc) kekcall(KEKCALL_DUMP_MEM, fp_ioc, (uintptr_t)f_ioc_buf, 256);
 
             klog_printf("[STRUCT_FILE_DUMP] fp_mp4 @ 0x%llx:\n", (unsigned long long)fp_mp4);
-            for (int i = 0; i < 16; i++) {
+            for (int i = 0; i < 20; i++) {
                 uint32_t off = i * 8;
                 uint64_t vm = f_mp4_buf[i];
                 uint64_t vi = f_ioc_buf[i];
@@ -1190,29 +1181,16 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
             }
         }
 
+        /* Тест записи в fd_mp4 */
+        uint8_t test_payload[4] = {0x01, 0x02, 0x03, 0x04};
+        ssize_t nw = write(fd_mp4, test_payload, sizeof(test_payload));
+        klog_printf("[FILE_TEST] write to fd_mp4: nw=%zd errno=%d\n", nw, errno);
+
         if (fd_mp4 >= 0) close(fd_mp4);
         if (fd_ioc >= 0) close(fd_ioc);
 
         /* Возвращаем оригинальный d_open */
         kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, orig_dopen_calc, 0);
-    }
-
-    /* ========================================================================= */
-    /* ТЕСТ 2: DIRECT KERNEL d_open (KEKCALL 36)                                  */
-    /* ========================================================================= */
-    klog_printf("[DIRECT_DOPEN] === TEST 2: Direct kernel d_open call via KEKCALL 36 ===\n");
-    if (mp4_cdev_addr && orig_dopen_calc) {
-        /* 1. Вызов с текущим curthread */
-        long ret_cur = kekcall5(KEKCALL_CALL_DOPEN, orig_dopen_calc, mp4_cdev_addr, O_RDWR, 0 /* curthread */);
-        klog_printf("[DIRECT_DOPEN] curthread: ret=%ld\n", ret_cur);
-
-        /* 2. Вызов с O_RDONLY */
-        long ret_ro = kekcall5(KEKCALL_CALL_DOPEN, orig_dopen_calc, mp4_cdev_addr, O_RDONLY, 0 /* curthread */);
-        klog_printf("[DIRECT_DOPEN] curthread (O_RDONLY): ret=%ld\n", ret_ro);
-
-        /* 3. Вызов с NULL td */
-        long ret_null = kekcall5(KEKCALL_CALL_DOPEN, orig_dopen_calc, mp4_cdev_addr, O_RDWR, 1 /* NULL td */);
-        klog_printf("[DIRECT_DOPEN] NULL td: ret=%ld\n", ret_null);
     }
 
 
