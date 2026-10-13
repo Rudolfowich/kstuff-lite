@@ -1127,10 +1127,10 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                 uint8_t fdbuf[0x400] = {0};
                 kekcall(KEKCALL_DUMP_MEM, fd_ofiles, (uintptr_t)fdbuf, 0x400);
 
-                /* Шаг 0x18 точно подтвержден в прошлом прогоне */
+                /* Таблица fdescent во FreeBSD: элементы начинаются с +0x00 */
                 uint32_t stride = 0x18;
-                uint32_t slot_mp4 = 0x08 + fd_mp4 * stride;
-                uint32_t slot_null = (fd_null >= 0) ? (0x08 + fd_null * stride) : 0;
+                uint32_t slot_mp4 = fd_mp4 * stride;
+                uint32_t slot_null = (fd_null >= 0) ? (fd_null * stride) : 0;
 
                 if (slot_mp4 + 8 <= 0x400) fp_mp4 = *(uint64_t*)(fdbuf + slot_mp4);
                 if (slot_null && slot_null + 8 <= 0x400) fp_null = *(uint64_t*)(fdbuf + slot_null);
@@ -1140,8 +1140,12 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
             }
         }
 
+        /* Выравниваем на 8 байт для безопасности */
+        fp_mp4 &= ~7ULL;
+        fp_null &= ~7ULL;
+
         /* Дамп и diff 256 байт struct file: mp4 vs native null */
-        if (fp_mp4 && fp_null) {
+        if (fp_mp4 && fp_null && (fp_mp4 >> 48) == 0xffff && (fp_null >> 48) == 0xffff) {
             uint64_t f_mp4_buf[32] = {0};
             uint64_t f_null_buf[32] = {0};
             kekcall(KEKCALL_DUMP_MEM, fp_mp4, (uintptr_t)f_mp4_buf, 256);
