@@ -1728,8 +1728,48 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                                                 md_dbody[row+24],md_dbody[row+25],md_dbody[row+26],md_dbody[row+27],
                                                 md_dbody[row+28],md_dbody[row+29],md_dbody[row+30],md_dbody[row+31]);
                                 }
-                                /* SKIP the risky +0x18 patch — we need to understand the body first */
-                                klog_printf("[MP4_DUMP_PATCH] skipping blind patch — body dumped for offline analysis\n");
+                                /* mp4/dump structure (analyzed offline):
+                                 *   +0x00..+0x17: prologue, r15=softc, call DAC-check
+                                 *   +0x1d: test eax, eax
+                                 *   +0x1f: 74 4f  je +0x4f → +0x70 (EPERM return 1)
+                                 *   +0x21..+0x6f: mutex lock + softc init (SUCCESS path)
+                                 *   +0x70: mov r14d, 1 (EPERM)
+                                 * Patch byte +0x1f: 0x74 (je) → 0x75 (jne).
+                                 * When DAC returns 0 (deny), fall-through to SUCCESS path. */
+                                uint64_t md_patch2_addr = md_real_dopen + 0x18;
+                                uint64_t md_patch2_orig = 0;
+                                kekcall(KEKCALL_DUMP_MEM, md_patch2_addr, (uintptr_t)&md_patch2_orig, 8);
+                                /* Expected: 0x74c085ff9d6de3e8 (call rel + test + je) */
+                                uint64_t md_patch2_val = (md_patch2_orig & ~(0xffULL << 56)) |
+                                                          (0x75ULL << 56);  /* je → jne */
+                                klog_printf("[MP4_DUMP_PATCH] +0x18 orig=0x%016llx -> patch=0x%016llx (je→jne)\n",
+                                            (unsigned long long)md_patch2_orig,
+                                            (unsigned long long)md_patch2_val);
+                                long wr2 = kekcall(27, md_patch2_addr, md_patch2_val, 0);
+                                uint64_t rb2 = 0;
+                                kekcall(KEKCALL_DUMP_MEM, md_patch2_addr, (uintptr_t)&rb2, 8);
+                                klog_printf("[MP4_DUMP_PATCH] wr=%ld readback=0x%016llx %s\n",
+                                            wr2, (unsigned long long)rb2,
+                                            (rb2 == md_patch2_val) ? "OK" : "FAIL");
+                                if (rb2 == md_patch2_val) {
+                                    errno = 0;
+                                    md_fd = open("/dev/mp4/dump", O_RDWR);
+                                    klog_printf("[MP4_DUMP_OPEN3] after je→jne patch O_RDWR fd=%d errno=%d\n",
+                                                md_fd, errno);
+                                    if (md_fd < 0) {
+                                        errno = 0;
+                                        md_fd = open("/dev/mp4/dump", O_RDONLY);
+                                        klog_printf("[MP4_DUMP_OPEN3] O_RDONLY fd=%d errno=%d\n",
+                                                    md_fd, errno);
+                                    }
+                                    /* ALWAYS restore the original byte */
+                                    long wr_restore = kekcall(27, md_patch2_addr, md_patch2_orig, 0);
+                                    uint64_t rb_restore = 0;
+                                    kekcall(KEKCALL_DUMP_MEM, md_patch2_addr, (uintptr_t)&rb_restore, 8);
+                                    klog_printf("[MP4_DUMP_PATCH] restored wr=%ld rb=0x%016llx %s\n",
+                                                wr_restore, (unsigned long long)rb_restore,
+                                                (rb_restore == md_patch2_orig) ? "OK" : "DANGER");
+                                }
                                 goto skip_md_patch;
                                 /* Try the same DOPEN_JMP recipe: read qword at real_dopen+0x18,
                                  * if it matches canonical, patch to jmp +0x51. */
