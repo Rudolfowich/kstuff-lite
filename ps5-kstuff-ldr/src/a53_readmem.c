@@ -1541,24 +1541,51 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                      *    0xc014420b = _IOWR('B',11, 20-byte struct)
                      *    0xc0144215 = _IOWR('B',21, 20-byte struct)
                      * Группа 'B' = 0x42, size=0x14=20 байт. */
-                    struct { uint32_t cmd; const char *tag; } mp4_cmds[] = {
-                        { 0x4014421b, "IOW_B_27"  },
-                        { 0x4014421c, "IOW_B_28"  },
-                        { 0xc014420b, "IOWR_B_11" },
-                        { 0xc0144215, "IOWR_B_21" },
-                    };
-                    for (int ci = 0; ci < 4; ci++) {
-                        uint8_t argbuf[20] = {0};
+                    /* B_11 (0xc014420b) и B_21 (0xc0144215) блокируют поток
+                     * (waiting на mp4 hw response) → убраны. Сначала пробуем
+                     * init cmd'ы B_28/B_31/B_32, смотрим на return. */
+                    {
+                        /* B_28: _IOW('B',28, 20 bytes) — первый в прошлый ран дал
+                         *       ret=0, out[0..3]=14 00 00 00 (=20), out[8..11]=ff ff ff ff */
+                        uint8_t a[20] = {0};
                         errno = 0;
-                        int ir = ioctl(jfd, mp4_cmds[ci].cmd, argbuf);
+                        int ir = ioctl(jfd, 0x4014421c, a);
                         int ie = errno;
-                        klog_printf("[IOCTL_%s] req=0x%08x ret=%d errno=%d out20=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
-                                    mp4_cmds[ci].tag, mp4_cmds[ci].cmd, ir, ie,
-                                    argbuf[0],argbuf[1],argbuf[2],argbuf[3],
-                                    argbuf[4],argbuf[5],argbuf[6],argbuf[7],
-                                    argbuf[8],argbuf[9],argbuf[10],argbuf[11],
-                                    argbuf[12],argbuf[13],argbuf[14],argbuf[15],
-                                    argbuf[16],argbuf[17],argbuf[18],argbuf[19]);
+                        klog_printf("[IOCTL_IOW_B_28] ret=%d errno=%d out20=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                    ir, ie,
+                                    a[0],a[1],a[2],a[3], a[4],a[5],a[6],a[7],
+                                    a[8],a[9],a[10],a[11], a[12],a[13],a[14],a[15],
+                                    a[16],a[17],a[18],a[19]);
+                    }
+                    {
+                        /* B_31: _IOW('B',31, 8 bytes) — маленький, вероятно init */
+                        uint8_t a[8] = {0};
+                        errno = 0;
+                        int ir = ioctl(jfd, 0x4008421f, a);
+                        int ie = errno;
+                        klog_printf("[IOCTL_IOW_B_31] ret=%d errno=%d out8=%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                    ir, ie, a[0],a[1],a[2],a[3], a[4],a[5],a[6],a[7]);
+                    }
+                    {
+                        /* B_32: _IOW('B',32, 8 bytes) — маленький, вероятно init */
+                        uint8_t a[8] = {0};
+                        errno = 0;
+                        int ir = ioctl(jfd, 0x40084220, a);
+                        int ie = errno;
+                        klog_printf("[IOCTL_IOW_B_32] ret=%d errno=%d out8=%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                    ir, ie, a[0],a[1],a[2],a[3], a[4],a[5],a[6],a[7]);
+                    }
+                    /* После init cmd'ов повтор read'а и B_28 — вдруг изменилось */
+                    {
+                        uint8_t a[20] = {0};
+                        errno = 0;
+                        int ir = ioctl(jfd, 0x4014421c, a);
+                        int ie = errno;
+                        klog_printf("[IOCTL_IOW_B_28_AGAIN] ret=%d errno=%d out20=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                    ir, ie,
+                                    a[0],a[1],a[2],a[3], a[4],a[5],a[6],a[7],
+                                    a[8],a[9],a[10],a[11], a[12],a[13],a[14],a[15],
+                                    a[16],a[17],a[18],a[19]);
                     }
 
                     /* 3) После ioctl-попыток — ещё один read 4096 на случай если ioctl разогрел буфер */
