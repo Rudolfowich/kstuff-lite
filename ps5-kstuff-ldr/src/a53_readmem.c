@@ -1374,12 +1374,11 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     }
 
     /* ========================================================================= */
-    /* MP4_GATE_TEST: читаем kernel-global (DAC-check flag для mp4/dump_for_decid*/
-    /* найденный в DOPEN_HEX chain of callers) и перебираем значения 0..7, после */
-    /* каждой записи — пробуем open mp4/dump_for_decid, затем восстанавливаем.   */
-    /* kbase+0xc2446c = global, kbase+0x2c5c310 = debug format string.          */
+    /* MP4_GATE_TEST: ОТКЛЮЧЕНО (вызывает ребут через ~5s после 2-3 open'ов     */
+    /* mp4/dump_for_decid под модифицированным global state — похоже на         */
+    /* kernel-side watchdog/race condition).                                     */
     /* ========================================================================= */
-    {
+    if (0) {
         uint64_t kbase_now = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
         if (kbase_now > 0xffffffff00000000ULL) {
             uint64_t global_va = kbase_now + 0xc2446cULL;
