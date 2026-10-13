@@ -1029,42 +1029,52 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     if (fd0 >= 0) {
         klog_printf("[STEP1] *** VICTORY: /dev/mp4/dump OPENED WITHOUT NEW PATCH! fd=%d ***\n", fd0);
         /* RPC pre-patch is active. Probe all 6 ioctl cmds. */
+        /* mp4/dump uses 'A' group ioctls (0x41), not 'B'. Reverse-engineered from
+         * d_ioctl switch: A_11(12), A_14(8), A_20(24), A_31(8), A_32(8), A_40(12) */
         {
-            uint8_t a[20] = {0};
+            uint8_t a[12] = {0};
             errno = 0;
-            int r = ioctl(fd0, 0x4014421c, a);
-            klog_printf("[S1_B28] ret=%d errno=%d out20=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
-                        r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],
+            int r = ioctl(fd0, 0x800c410b, a);  /* A_11 IOR 12 */
+            klog_printf("[S1_A11] ret=%d errno=%d out12=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                        r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11]);
+        }
+        {
+            uint8_t a[8] = {0};
+            errno = 0;
+            int r = ioctl(fd0, 0x8008410e, a);  /* A_14 IOR 8 */
+            klog_printf("[S1_A14] ret=%d errno=%d out8=%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                        r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7]);
+        }
+        {
+            uint8_t a[24] = {0};
+            errno = 0;
+            int r = ioctl(fd0, 0x40184114, a);  /* A_20 IOW 24 */
+            klog_printf("[S1_A20] ret=%d errno=%d out24=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                        r, errno,
+                        a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],
                         a[8],a[9],a[10],a[11],a[12],a[13],a[14],a[15],
-                        a[16],a[17],a[18],a[19]);
+                        a[16],a[17],a[18],a[19],a[20],a[21],a[22],a[23]);
         }
         {
             uint8_t a[8] = {0};
             errno = 0;
-            int r = ioctl(fd0, 0x4008421f, a);
-            klog_printf("[S1_B31] ret=%d errno=%d out8=%02x%02x%02x%02x %02x%02x%02x%02x\n",
+            int r = ioctl(fd0, 0x4008411f, a);  /* A_31 IOW 8 */
+            klog_printf("[S1_A31] ret=%d errno=%d out8=%02x%02x%02x%02x %02x%02x%02x%02x\n",
                         r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7]);
         }
         {
             uint8_t a[8] = {0};
             errno = 0;
-            int r = ioctl(fd0, 0x40084220, a);
-            klog_printf("[S1_B32] ret=%d errno=%d out8=%02x%02x%02x%02x %02x%02x%02x%02x\n",
+            int r = ioctl(fd0, 0x40084120, a);  /* A_32 IOW 8 */
+            klog_printf("[S1_A32] ret=%d errno=%d out8=%02x%02x%02x%02x %02x%02x%02x%02x\n",
                         r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7]);
         }
         {
-            uint32_t b[5] = {0x14, 0, 0, 0, 0};
+            uint8_t a[12] = {0};
             errno = 0;
-            int r = ioctl(fd0, 0xc014420b, b);
-            klog_printf("[S1_B11] ret=%d errno=%d out=0x%08x 0x%08x 0x%08x 0x%08x 0x%08x\n",
-                        r, errno, b[0],b[1],b[2],b[3],b[4]);
-        }
-        {
-            uint32_t b[5] = {0x14, 0, 0, 0, 0};
-            errno = 0;
-            int r = ioctl(fd0, 0xc0144215, b);
-            klog_printf("[S1_B21] ret=%d errno=%d out=0x%08x 0x%08x 0x%08x 0x%08x 0x%08x\n",
-                        r, errno, b[0],b[1],b[2],b[3],b[4]);
+            int r = ioctl(fd0, 0x800c4128, a);  /* A_40 IOR 12 */
+            klog_printf("[S1_A40] ret=%d errno=%d out12=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                        r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11]);
         }
         {
             uint8_t rbuf[256] = {0};
