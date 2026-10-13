@@ -1651,11 +1651,11 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                         klog_printf("[MP4_DUMP_OPEN] O_PATH-ish fd=%d errno=%d\n", md_fd, errno);
                     }
                     if (md_fd < 0 && g_cdev_mp4_dump) {
-                        /* mp4/dump has own csw. Read it from cdev+0x58 (si_devsw). */
+                        /* mp4/dump has own csw. Read it from cdev+0x68 (si_devsw). */
                         uint64_t md_csw = 0;
-                        kekcall(KEKCALL_DUMP_MEM, g_cdev_mp4_dump + 0x58ULL,
+                        kekcall(KEKCALL_DUMP_MEM, g_cdev_mp4_dump + 0x68ULL,
                                 (uintptr_t)&md_csw, 8);
-                        klog_printf("[MP4_DUMP_CSW] from cdev+0x58: 0x%llx\n",
+                        klog_printf("[MP4_DUMP_CSW] from cdev+0x68: 0x%llx\n",
                                     (unsigned long long)md_csw);
                         if (!md_csw) goto skip_md_patch;
                         {
