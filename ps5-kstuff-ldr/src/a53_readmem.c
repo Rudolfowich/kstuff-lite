@@ -1555,10 +1555,9 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                         }
                     }
                     /* Try test6's recipe: revoke() first then open() */
-                    extern long syscall(long, ...);
                     errno = 0;
-                    long rv = syscall(56, "/dev/mp4/dump");  // SYS_revoke
-                    klog_printf("[MP4_DUMP_REVOKE] syscall(56, /dev/mp4/dump) ret=%ld errno=%d\n", rv, errno);
+                    int rv = syscall(56, "/dev/mp4/dump");  // SYS_revoke
+                    klog_printf("[MP4_DUMP_REVOKE] syscall(56, /dev/mp4/dump) ret=%d errno=%d\n", rv, errno);
                     errno = 0;
                     int md_fd = open("/dev/mp4/dump", O_RDWR);
                     int md_err = errno;
