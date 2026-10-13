@@ -3347,14 +3347,19 @@ apply_profile(const unsigned char *profile, struct a53_apply_ctx *ctx)
         }
     }
 
-    /* Step 6: emit standalone extra_addr pairs. */
+    /* Step 6: emit standalone extra_addr pairs.
+     * From profile 55 layout (verified via dry-run dump):
+     *   +0x148 u64 addr_a1  — paired with +0x158 lo u32 instr
+     *   +0x150 u64 addr_a2  — paired with +0x158 hi u32 instr (+0x15c)
+     *   +0x160 u64 addr_a3  — paired with +0x168 u32 instr
+     *   +0x170 u64 addr_a4  — paired with +0x178 u32 instr (CBNZ)
+     *   +0x180 u64 addr_a5  — paired with +0x188 u32 instr
+     */
     const struct { uint16_t addr_off; uint16_t instr_off; } extras[] = {
-        /* +0x148 addr paired with +0x120 (first packed BL low u32)
-         * +0x150 addr paired with +0x124 (second packed BL low u32)
-         * This pairing is INFERRED; verify in dry-run. */
-        { 0x148, 0x120 }, { 0x150, 0x124 },
-        { 0x160, 0x158 }, { 0x168, 0x15c },  /* 2 instrs at +0x158 (packed) */
-        { 0x170, 0x168 }, { 0x180, 0x188 },
+        { 0x148, 0x158 }, { 0x150, 0x15c },
+        { 0x160, 0x168 },
+        { 0x170, 0x178 },
+        { 0x180, 0x188 },
     };
     for (unsigned i = 0; i < sizeof(extras)/sizeof(extras[0]); i++) {
         uint64_t a;
