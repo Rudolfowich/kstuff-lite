@@ -1141,6 +1141,80 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = 0;
         return 0;
     }
+    else if(nr == 34)
+    {
+        /* KEKCALL_MUTATE_INPLACE:
+         * In-place мутация our_ucred полями из video_ucred БЕЗ подмены указателя.
+         * args[RDI] = video_ucred
+         * args[RSI] = user_buf (бэкап старых значений our_ucred, 512 байт)
+         * regs[RDI] = curthread */
+        uint64_t video_ucred = args[RDI];
+        uint64_t user_buf    = args[RSI];
+        uint64_t td          = regs[RDI];
+
+        uint64_t our_ucred = 0;
+        kpeek64_checked(td + 0x140, &our_ucred);
+
+        if (!our_ucred || !video_ucred) return EINVAL;
+
+        /* 1. Бэкап первых 512 байт our_ucred в user_buf */
+        if (user_buf) {
+            uint64_t bkp[64] = {0};
+            for (int i = 0; i < 64; i++) {
+                kpeek64_checked(our_ucred + i * 8, &bkp[i]);
+            }
+            if (copy_to_kernel(user_buf, bkp, sizeof(bkp)))
+                return EFAULT;
+        }
+
+        /* 2. Копируем все ключевые поля из video_ucred в our_ucred, НЕ трогая cr_ref (+0x00) */
+        /* Поля идентичности: uid/ruid (+0x08), svuid (+0x10), rgid (+0x18) */
+        uint64_t v = 0;
+        kpeek64_checked(video_ucred + 0x08, &v); kpoke64(our_ucred + 0x08, v);
+        kpeek64_checked(video_ucred + 0x10, &v); kpoke64(our_ucred + 0x10, v);
+        kpeek64_checked(video_ucred + 0x18, &v); kpoke64(our_ucred + 0x18, v);
+
+        /* authid (+0x58) */
+        kpeek64_checked(video_ucred + 0x58, &v); kpoke64(our_ucred + 0x58, v);
+
+        /* sce_caps (0x60..0x98) */
+        for (uint32_t off = 0x60; off <= 0x98; off += 8) {
+            kpeek64_checked(video_ucred + off, &v);
+            kpoke64(our_ucred + off, v);
+        }
+
+        /* agroups (+0x120) */
+        kpeek64_checked(video_ucred + 0x120, &v); kpoke64(our_ucred + 0x120, v);
+
+        args[RAX] = 0;
+        return 0;
+    }
+    else if(nr == 35)
+    {
+        /* KEKCALL_RESTORE_INPLACE:
+         * Восстановление our_ucred из user_buf (512 байт).
+         * args[RDI] = user_buf
+         * regs[RDI] = curthread */
+        uint64_t user_buf = args[RDI];
+        uint64_t td       = regs[RDI];
+
+        uint64_t our_ucred = 0;
+        kpeek64_checked(td + 0x140, &our_ucred);
+
+        if (!our_ucred || !user_buf) return EINVAL;
+
+        uint64_t bkp[64] = {0};
+        if (copy_from_kernel(bkp, user_buf, sizeof(bkp)))
+            return EFAULT;
+
+        /* Восстанавливаем поля с +0x08 по +0x1f8 (пропуская cr_ref на +0x00) */
+        for (int i = 1; i < 64; i++) {
+            kpoke64(our_ucred + i * 8, bkp[i]);
+        }
+
+        args[RAX] = 0;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;

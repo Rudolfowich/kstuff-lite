@@ -28,6 +28,8 @@
 #define KEKCALL_SCAN_TD_UCRED     31
 #define KEKCALL_DIFF_TEST         32
 #define KEKCALL_RESTORE_DIFF      33
+#define KEKCALL_MUTATE_INPLACE    34
+#define KEKCALL_RESTORE_INPLACE   35
 
 static inline long
 kekcall(uint32_t nr, uint64_t a1, uint64_t a2, uint64_t a3)

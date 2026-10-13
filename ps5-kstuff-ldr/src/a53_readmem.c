@@ -992,6 +992,48 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     uint64_t cand_prison_ptr = diff_buf[3];
 
     /* ------------------------------------------------------------------------- */
+    /* ГЛАВНЫЙ ТЕСТ: IN-PLACE MUTATION (КЛОНИРОВАНИЕ ПОЛЕЙ БЕЗ ПОДМЕНЫ УКАЗАТЕЛЯ) */
+    /* ------------------------------------------------------------------------- */
+    klog_printf("[INPLACE_START] === TEST: IN-PLACE UCRED MUTATION (KEKCALL 34) ===\n");
+    {
+        static uint64_t inplace_bkp[64];
+        memset(inplace_bkp, 0, sizeof(inplace_bkp));
+
+        long mut_ret = kekcall(KEKCALL_MUTATE_INPLACE, video_ucred, (uintptr_t)inplace_bkp, 0);
+        klog_printf("[INPLACE_SET] KEKCALL_MUTATE_INPLACE ret=%ld\n", mut_ret);
+
+        errno = 0;
+        int fd_mut = open("/dev/mp4/dump_for_decid", O_RDWR);
+        int em = errno;
+        if (fd_mut < 0 && em == 1) {
+            fd_mut = open("/dev/mp4/dump_for_decid", O_RDONLY);
+            em = errno;
+        }
+        klog_printf("[INPLACE_OPEN] fd=%d errno=%d\n", fd_mut, em);
+
+        if (fd_mut >= 0) {
+            klog_printf("[INPLACE_OPEN] *** BINGO! VICTORY! /dev/mp4/dump_for_decid OPENED WITH IN-PLACE MUTATION! ***\n");
+            uint8_t cmd[4] = {0x01, 0x00, 0x00, 0x00};
+            errno = 0;
+            ssize_t nw = write(fd_mut, cmd, 4);
+            int we = errno;
+            uint8_t rdata[256] = {0};
+            errno = 0;
+            ssize_t nr = read(fd_mut, rdata, sizeof(rdata));
+            int re = errno;
+            klog_printf("[INPLACE_IO] write nw=%zd (errno=%d) read nr=%zd (errno=%d)\n", nw, we, nr, re);
+            if (nr > 0) {
+                klog_printf("[INPLACE_DATA] first_u32=0x%08x\n", *(uint32_t*)rdata);
+            }
+            close(fd_mut);
+        }
+
+        /* Восстановление */
+        long rst_ret = kekcall(KEKCALL_RESTORE_INPLACE, (uintptr_t)inplace_bkp, 0, 0);
+        klog_printf("[INPLACE_RESTORE] KEKCALL_RESTORE_INPLACE ret=%ld\n", rst_ret);
+    }
+
+    /* ------------------------------------------------------------------------- */
     /* ТЕСТ 2 — Prison test: KEKCALL 32 с флагом 1 (патчит cr_prison)            */
     /* ------------------------------------------------------------------------- */
     klog_printf("[TEST2_START] === TEST 2: Prison test via KEKCALL 32 (flags=1) ===\n");
