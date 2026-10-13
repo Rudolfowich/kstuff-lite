@@ -1085,6 +1085,38 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                         a[16],a[17],a[18],a[19],a[20],a[21],a[22],a[23]);
         }
         {
+            /* A_21: query 24 bytes, reads session_record state */
+            uint8_t a[24] = {0};
+            errno = 0;
+            int r = ioctl(fd0, 0x40184115, a);  /* A_21 IOW 24 */
+            klog_printf("[S1_A21] ret=%d errno=%d out24=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                        r, errno,
+                        a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],
+                        a[8],a[9],a[10],a[11],a[12],a[13],a[14],a[15],
+                        a[16],a[17],a[18],a[19],a[20],a[21],a[22],a[23]);
+        }
+        {
+            /* A_23: query 32 bytes — potential READ_MEMORY response */
+            uint8_t a[32] = {0};
+            errno = 0;
+            int r = ioctl(fd0, 0x40204117, a);  /* A_23 IOW 32 */
+            klog_printf("[S1_A23] ret=%d errno=%d out32:\n", r, errno);
+            for (int i = 0; i < 32; i += 16) {
+                klog_printf("[S1_A23+%02x] %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                            i,
+                            a[i+0],a[i+1],a[i+2],a[i+3],a[i+4],a[i+5],a[i+6],a[i+7],
+                            a[i+8],a[i+9],a[i+10],a[i+11],a[i+12],a[i+13],a[i+14],a[i+15]);
+            }
+        }
+        {
+            /* A_15: 8-byte read response */
+            uint8_t a[8] = {0};
+            errno = 0;
+            int r = ioctl(fd0, 0x8008410f, a);  /* A_15 IOR 8 */
+            klog_printf("[S1_A15] ret=%d errno=%d out8=%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                        r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7]);
+        }
+        {
             uint8_t a[8] = {0};
             errno = 0;
             int r = ioctl(fd0, 0x4008411f, a);  /* A_31 IOW 8 */
