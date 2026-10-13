@@ -1664,15 +1664,20 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                         sicred_buf[b+8], sicred_buf[b+9], sicred_buf[b+10], sicred_buf[b+11],
                         sicred_buf[b+12], sicred_buf[b+13], sicred_buf[b+14], sicred_buf[b+15]);
         }
-        uint32_t sc_uid    = *(uint32_t*)(sicred_buf + 0x04);
-        uint64_t sc_prison = *(uint64_t*)(sicred_buf + 0x30);
-        uint64_t sc_auth   = *(uint64_t*)(sicred_buf + 0x58);
-        uint64_t sc_label  = *(uint64_t*)(sicred_buf + 0x78);
-        klog_printf("[SI_CRED_FIELDS cdev[%d]] cr_uid=%u cr_prison=0x%llx cr_sce_authid=0x%llx cr_label=0x%llx\n",
-                    m, sc_uid,
-                    (unsigned long long)sc_prison,
-                    (unsigned long long)sc_auth,
-                    (unsigned long long)sc_label);
+        /* NOTE: cdev+0xa8 на PS5 — НЕ struct ucred (FreeBSD si_cred), а Sony-
+         * specific device-private context (vtable для cdev[0], mp4_dev_t с
+         * guard 0xdeadbeef для cdev[1]). Поля ниже — просто сырые qword'ы
+         * на тех же оффсетах, НЕ интерпретировать как ucred. */
+        uint64_t q00 = *(uint64_t*)(sicred_buf + 0x00);
+        uint64_t q08 = *(uint64_t*)(sicred_buf + 0x08);
+        uint64_t q58 = *(uint64_t*)(sicred_buf + 0x58);
+        uint64_t q1f8 = *(uint64_t*)(sicred_buf + 0x1f8);
+        klog_printf("[DEVCTX cdev[%d]] (NOT ucred) +0x00=0x%llx +0x08=0x%llx +0x58=0x%llx +0x1f8=0x%llx\n",
+                    m,
+                    (unsigned long long)q00,
+                    (unsigned long long)q08,
+                    (unsigned long long)q58,
+                    (unsigned long long)q1f8);
     }
     klog_printf("[NATIVE_OPEN] === END probe ===\n");
 
@@ -1894,19 +1899,33 @@ install_ppr_a53(uint32_t system_fw_version)
             uint8_t chunk[4096];
             uint64_t bytes_written = 0;
             uint64_t pages_skipped = 0;
+            uint64_t iter = 0;
+            const uint64_t total_iters = scan_size / sizeof(chunk);
+            /* Прогресс каждые 128 итераций = 512 KB. Yield после каждого чанка,
+             * иначе SceShellCore фризится и watchdog ребутает консоль. */
+            const uint64_t PROGRESS_EVERY = 128;
 
             for (uint64_t cur = scan_start; cur < scan_start + scan_size; cur += sizeof(chunk)) {
                 memset(chunk, 0, sizeof(chunk));
                 long ret = kekcall(KEKCALL_SAFE_PEEK, cur, (uint64_t)chunk, sizeof(chunk));
-                if (ret == 0) {
-                    ssize_t w = write(kdfd, chunk, sizeof(chunk));
-                    if (w > 0) bytes_written += w;
-                } else {
-                    /* Не смапленная страница — заполняем нулями для сохранения смещений */
+                if (ret != 0) {
                     memset(chunk, 0, sizeof(chunk));
-                    ssize_t w = write(kdfd, chunk, sizeof(chunk));
-                    if (w > 0) bytes_written += w;
                     pages_skipped++;
+                }
+                ssize_t w = write(kdfd, chunk, sizeof(chunk));
+                if (w > 0) bytes_written += w;
+
+                /* Отдаём шедулеру — критично чтобы SceShellCore не фризился */
+                usleep(100);
+
+                iter++;
+                if ((iter % PROGRESS_EVERY) == 0 || iter == total_iters) {
+                    klog_printf("[KDUMP] progress %llu/%llu (%llu KB, skipped=%llu, at 0x%llx)\n",
+                                (unsigned long long)iter,
+                                (unsigned long long)total_iters,
+                                (unsigned long long)(bytes_written / 1024),
+                                (unsigned long long)pages_skipped,
+                                (unsigned long long)(cur + sizeof(chunk)));
                 }
             }
             close(kdfd);
