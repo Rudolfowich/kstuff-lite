@@ -1118,46 +1118,18 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
             int fd_null = open("/dev/null", O_RDWR);
             klog_printf("[FILE_TEST] opened fds: fd_mp4=%d fd_null=%d\n", fd_mp4, fd_null);
 
-            /* Надежный curproc: scanned_proc получен из KEKCALL_SCAN_TD_UCRED */
-            uint64_t my_curproc = scanned_proc;
-            uint64_t p_fd = 0;
-            int p_fd_off = -1;
-            uint64_t verified_fd_files = 0;
+            /* Получаем указатели fd_files, fp_mp4, fp_null через KEKCALL 36 в Ring 0 */
+            uint64_t fd_info[8] = {0};
+            long r_info = kekcall(36 /* GET_FD_INFO */, (uint64_t)fd_mp4, (uint64_t)fd_null, (uintptr_t)fd_info);
+            uint64_t p_fd = fd_info[0];
+            uint64_t verified_fd_files = fd_info[1];
+            uint64_t fp_mp4 = fd_info[2];
+            uint64_t fp_null = fd_info[3];
+            int p_fd_off = (int)fd_info[4];
 
-            if (my_curproc) {
-                klog_printf("[P_SCAN] starting safe scan of proc=0x%llx\n", (unsigned long long)my_curproc);
-                for (int off = 0; off < 0x200; off += 8) {
-                    uint64_t v = 0;
-                    long r1 = kekcall(KEKCALL_SAFE_PEEK, my_curproc + (uint64_t)off, (uintptr_t)&v, 0);
-                    if (r1 != 0) continue;
-
-                    /* Проверка 1: heap pointer (0xffff[89a-f]..., не kernel .text 0xffffffff...) */
-                    if ((v >> 48) != 0xffff || (v >> 40) == 0xffffff) continue;
-
-                    /* Проверка 2: v+0x08 тоже доступный heap pointer */
-                    uint64_t fd_files = 0;
-                    long r2 = kekcall(KEKCALL_SAFE_PEEK, v + 0x08ULL, (uintptr_t)&fd_files, 0);
-                    if (r2 != 0 || (fd_files >> 48) != 0xffff || (fd_files >> 40) == 0xffffff) continue;
-
-                    /* Проверка 3: *(fd_files) или *(fd_files+8) — struct file* (heap, не text) */
-                    uint64_t first_fp = 0;
-                    long r3 = kekcall(KEKCALL_SAFE_PEEK, fd_files, (uintptr_t)&first_fp, 0);
-                    if (r3 != 0 || (first_fp >> 48) != 0xffff || (first_fp >> 40) == 0xffffff) {
-                        r3 = kekcall(KEKCALL_SAFE_PEEK, fd_files + 0x08ULL, (uintptr_t)&first_fp, 0);
-                        if (r3 != 0 || (first_fp >> 48) != 0xffff || (first_fp >> 40) == 0xffffff) continue;
-                    }
-
-                    /* ПРАВИЛЬНЫЙ p_fd найден */
-                    p_fd = v;
-                    p_fd_off = off;
-                    verified_fd_files = fd_files;
-                    klog_printf("[P_FD_REAL] offset=0x%x p_fd=0x%llx fd_files=0x%llx first_fp=0x%llx\n",
-                                p_fd_off, (unsigned long long)v, (unsigned long long)fd_files, (unsigned long long)first_fp);
-                    break;
-                }
-            }
-
-            uint64_t fp_mp4 = 0, fp_null = 0;
+            klog_printf("[RING0_FD_INFO] ret=%ld p_fd=0x%llx (off=0x%x) fdt=0x%llx fp_mp4=0x%llx fp_null=0x%llx\n",
+                        r_info, (unsigned long long)p_fd, p_fd_off, (unsigned long long)verified_fd_files,
+                        (unsigned long long)fp_mp4, (unsigned long long)fp_null);
             uint32_t f_cdevpriv_off = 0;
 
             if (p_fd && verified_fd_files && fd_mp4 >= 0) {

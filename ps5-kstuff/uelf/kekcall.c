@@ -1217,8 +1217,89 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
     }
     else if(nr == 36)
     {
-        /* CALL_DOPEN_DIRECT - disabled for safety */
-        args[RAX] = (uint64_t)ENODEV;
+        /* GET_FD_INFO:
+         * args[RDI] = fd_mp4
+         * args[RSI] = fd_null
+         * args[RDX] = user_buf (64 bytes: [0]=p_fd, [1]=fd_files, [2]=fp_mp4, [3]=fp_null, [4]=p_fd_off, ...)
+         */
+        int target_fd_mp4 = (int)args[RDI];
+        int target_fd_null = (int)args[RSI];
+        uint64_t user_buf  = args[RDX];
+        uint64_t td        = regs[RDI];
+        uint64_t proc      = 0;
+        kpeek64_checked(td + 0x08, &proc);
+
+        uint64_t found_p_fd = 0;
+        uint64_t found_fd_files = 0;
+        uint64_t found_fp_mp4 = 0;
+        uint64_t found_fp_null = 0;
+        uint32_t found_off = 0;
+
+        if (proc) {
+            for (uint32_t off = 0; off < 0x200; off += 8) {
+                uint64_t v = 0;
+                if (kpeek64_checked(proc + off, &v) != 0) continue;
+                if ((v >> 48) != 0xffff || (v >> 40) == 0xffffff) continue;
+
+                uint64_t f_files = 0;
+                if (kpeek64_checked(v + 0x08, &f_files) != 0) continue;
+                if ((f_files >> 48) != 0xffff || (f_files >> 40) == 0xffffff) continue;
+
+                uint64_t cand_fp = 0;
+                if (kpeek64_checked(f_files, &cand_fp) != 0) continue;
+                if ((cand_fp >> 48) != 0xffff || (cand_fp >> 40) == 0xffffff) {
+                    if (kpeek64_checked(f_files + 8, &cand_fp) != 0) continue;
+                    if ((cand_fp >> 48) != 0xffff || (cand_fp >> 40) == 0xffffff) continue;
+                }
+
+                found_p_fd = v;
+                found_fd_files = f_files;
+                found_off = off;
+                break;
+            }
+        }
+
+        if (found_fd_files) {
+            /* Ищем struct file* в fdescent слотах (stride 0x18, 0x20, 0x28, 0x30) */
+            for (int stride = 0x18; stride <= 0x30; stride += 8) {
+                uint64_t cand_m = 0, cand_n = 0;
+                kpeek64_checked(found_fd_files + 8 + (uint64_t)target_fd_mp4 * stride, &cand_m);
+                kpeek64_checked(found_fd_files + 8 + (uint64_t)target_fd_null * stride, &cand_n);
+                if ((cand_m >> 48) == 0xffff && (cand_n >> 48) == 0xffff && cand_m != cand_n) {
+                    found_fp_mp4 = cand_m;
+                    found_fp_null = cand_n;
+                    break;
+                }
+            }
+            /* Если stride смещен, пробуем прямо по слотам */
+            if (!found_fp_mp4) {
+                for (int s = 0; s < 32; s++) {
+                    uint64_t val = 0;
+                    kpeek64_checked(found_fd_files + (uint64_t)s * 8, &val);
+                    if ((val >> 48) == 0xffff && (val >> 40) != 0xffffff) {
+                        if (!found_fp_mp4) found_fp_mp4 = val;
+                        else if (!found_fp_null && val != found_fp_mp4) {
+                            found_fp_null = val;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (user_buf) {
+            uint64_t out[8] = {
+                found_p_fd,
+                found_fd_files,
+                found_fp_mp4,
+                found_fp_null,
+                (uint64_t)found_off,
+                0, 0, 0
+            };
+            copy_to_kernel(user_buf, out, sizeof(out));
+        }
+
+        args[RAX] = found_fp_mp4 ? 0 : 1;
         return 0;
     }
     else if(nr == 0xffffffff)
