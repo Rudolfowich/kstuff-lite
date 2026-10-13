@@ -1247,22 +1247,13 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         /* --------------------------------------------------------------------- */
         /* БОНУС: Тест si_cred mp4 cdev (cdev + 0xa8) через KEKCALL 30           */
         /* --------------------------------------------------------------------- */
+        /* DISABLED 2026-10-13: KEKCALL_SWAP_BY_UCRED с валидным si_cred вызывает
+         * Fatal trap 12 и ребут PS5 — блокирует выполнение последующего
+         * NATIVE_OPEN блока. Подтверждено: si_cred ненулевой (0xfffff501018a2000),
+         * DAC-гейт через ucred compare. Оставляем только диагностический вывод. */
         uint64_t si_cred = *(uint64_t*)(cdev_buf + 0xa8);
-        klog_printf("[SI_CRED_TEST] cdev+0xa8 = 0x%llx\n", (unsigned long long)si_cred);
-        if (si_cred && (si_cred >> 48) == 0xffff) {
-            uint64_t swap_res[4] = {0};
-            long r_sw = kekcall(KEKCALL_SWAP_BY_UCRED, si_cred, (uintptr_t)swap_res, 0);
-            klog_printf("[SI_CRED_TEST] KEKCALL_SWAP_BY_UCRED ret=%ld\n", r_sw);
-
-            errno = 0;
-            int fd_sicred = open("/dev/mp4/dump_for_decid", O_RDWR);
-            int e_sicred = errno;
-            klog_printf("[SI_CRED_OPEN] open with si_cred: fd=%d (errno=%d)\n", fd_sicred, e_sicred);
-            if (fd_sicred >= 0) close(fd_sicred);
-
-            /* Восстанавливаем ucred обратно */
-            kekcall(17 /* RESTORE_FULL */, (uintptr_t)swap_res, 0, 0);
-        }
+        klog_printf("[SI_CRED_TEST] cdev+0xa8 = 0x%llx (SWAP disabled — see 2026-10-13)\n",
+                    (unsigned long long)si_cred);
     }
 
     /* ------------------------------------------------------------------------- */
