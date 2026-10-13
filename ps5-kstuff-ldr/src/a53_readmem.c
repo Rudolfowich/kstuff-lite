@@ -1512,6 +1512,71 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         if (!target_csw) continue;
         uint64_t orig_dopen = 0;
         kekcall(KEKCALL_DUMP_MEM, target_csw + 0x10ULL, (uintptr_t)&orig_dopen, 8);
+        klog_printf("[STEP4] mp4 csw[%d] 0x%llx (node '%s'): orig_dopen=0x%llx\n",
+                    m, (unsigned long long)target_csw, mp4_names[m], (unsigned long long)orig_dopen);
+
+        /* --------------------------------------------------------------------- */
+        /* ДАМП ВСЕЙ ТАБЛИЦЫ cdevsw (0x80 БАЙТ)                                 */
+        /* --------------------------------------------------------------------- */
+        klog_printf("[CDEVSW_DUMP] === Full cdevsw table dump for '%s' @ 0x%llx ===\n",
+                    mp4_names[m], (unsigned long long)target_csw);
+        for (int i = 0; i < 16; i++) {
+            uint64_t slot_val = 0;
+            kekcall(KEKCALL_DUMP_MEM, target_csw + (uint64_t)i * 8, (uintptr_t)&slot_val, 8);
+            const char *slot_name = "field";
+            if (i == 0) slot_name = "d_version";
+            else if (i == 1) slot_name = "d_name";
+            else if (i == 2) slot_name = "d_open";
+            else if (i == 3) slot_name = "d_fdopen";
+            else if (i == 4) slot_name = "d_close";
+            else if (i == 5) slot_name = "d_read";
+            else if (i == 6) slot_name = "d_write";
+            else if (i == 7) slot_name = "d_ioctl";
+            else if (i == 8) slot_name = "d_poll";
+            else if (i == 9) slot_name = "d_mmap";
+            klog_printf("[CSW+0x%02x] (%s) = 0x%016llx\n", i * 8, slot_name, (unsigned long long)slot_val);
+        }
+
+        /* --------------------------------------------------------------------- */
+        /* ДАМП И ДЕКОДИРОВАНИЕ TRAMPOLINE d_open -> REAL d_open FUNCTION         */
+        /* --------------------------------------------------------------------- */
+        if (orig_dopen && (orig_dopen >> 48) == 0xffff) {
+            uint8_t tramp[16] = {0};
+            kekcall(KEKCALL_DUMP_MEM, orig_dopen, (uintptr_t)tramp, 16);
+            klog_printf("[TRAMP] orig_dopen @ 0x%llx: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                        (unsigned long long)orig_dopen,
+                        tramp[0], tramp[1], tramp[2], tramp[3], tramp[4], tramp[5], tramp[6], tramp[7]);
+
+            uint64_t real_dopen = 0;
+            if (tramp[0] == 0xe9) {
+                /* jmp rel32: target = orig_dopen + 5 + (int32_t)rel32 */
+                int32_t rel32 = *(int32_t*)(tramp + 1);
+                real_dopen = orig_dopen + 5 + (int64_t)rel32;
+                klog_printf("[DECODE] rel32=0x%08x -> REAL d_open target = 0x%llx\n",
+                            (uint32_t)rel32, (unsigned long long)real_dopen);
+            } else {
+                real_dopen = orig_dopen;
+                klog_printf("[DECODE] direct entry point (no jmp) -> 0x%llx\n",
+                            (unsigned long long)real_dopen);
+            }
+
+            /* Дамп 0x200 байт тела настоящей d_open функции */
+            if (real_dopen && (real_dopen >> 48) == 0xffff) {
+                klog_printf("[DUMP_REAL_DOPEN] === Real d_open @ 0x%llx (0x200 bytes) ===\n",
+                            (unsigned long long)real_dopen);
+                uint8_t body[512] = {0};
+                kekcall(KEKCALL_DUMP_MEM, real_dopen, (uintptr_t)body, sizeof(body));
+                for (int l = 0; l < 32; l++) {
+                    klog_printf("[DOPEN+0x%03x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                l * 16,
+                                body[l*16 + 0], body[l*16 + 1], body[l*16 + 2], body[l*16 + 3],
+                                body[l*16 + 4], body[l*16 + 5], body[l*16 + 6], body[l*16 + 7],
+                                body[l*16 + 8], body[l*16 + 9], body[l*16 + 10], body[l*16 + 11],
+                                body[l*16 + 12], body[l*16 + 13], body[l*16 + 14], body[l*16 + 15]);
+                }
+            }
+        }
+
         klog_printf("[STEP4] patching mp4 csw[%d] 0x%llx (node '%s'): orig=0x%llx -> null_dopen=0x%llx...\n",
                     m, (unsigned long long)target_csw, mp4_names[m],
                     (unsigned long long)orig_dopen, (unsigned long long)null_dopen);
