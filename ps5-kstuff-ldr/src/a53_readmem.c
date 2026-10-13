@@ -1140,7 +1140,7 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                 p_fd_off = off;
                 verified_fd_files = fd_files;
                 klog_printf("[P_FD_REAL] offset=0x%x p_fd=0x%llx fd_files=0x%llx first_fp=0x%llx\n",
-                            off, (unsigned long long)v, (unsigned long long)fd_files, (unsigned long long)first_fp);
+                            p_fd_off, (unsigned long long)v, (unsigned long long)fd_files, (unsigned long long)first_fp);
                 break;
             }
         }
