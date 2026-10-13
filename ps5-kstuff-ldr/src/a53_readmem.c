@@ -1569,7 +1569,77 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
 
     signal(SIGSYS, SIG_DFL);
 
+    /* ========================================================================= */
+    /* NATIVE_OPEN: плоский open БЕЗ патча csw + дамп ucred для EPERM анализа     */
+    /* ========================================================================= */
+    klog_printf("[NATIVE_OPEN] === Probing /dev/mp4/dump_for_decid without csw patch ===\n");
+    errno = 0;
+    int nfd_rdwr = open("/dev/mp4/dump_for_decid", 0x0002 /* O_RDWR */);
+    int nerr_rdwr = errno;
+    klog_printf("[NATIVE_OPEN] O_RDWR: fd=%d errno=%d\n", nfd_rdwr, nerr_rdwr);
+    if (nfd_rdwr >= 0) {
+        klog_printf("[NATIVE_OPEN] *** UNEXPECTED SUCCESS O_RDWR fd=%d ***\n", nfd_rdwr);
+        close(nfd_rdwr);
+    }
 
+    errno = 0;
+    int nfd_rdonly = open("/dev/mp4/dump_for_decid", 0x0000 /* O_RDONLY */);
+    int nerr_rdonly = errno;
+    klog_printf("[NATIVE_OPEN] O_RDONLY: fd=%d errno=%d\n", nfd_rdonly, nerr_rdonly);
+    if (nfd_rdonly >= 0) {
+        klog_printf("[NATIVE_OPEN] *** RDONLY SUCCESS fd=%d (write-check differs) ***\n", nfd_rdonly);
+        close(nfd_rdonly);
+    }
+
+    /* UCRED dump: hex window + extracted named fields */
+    if (our_ucred) {
+        uint8_t ucred_buf[128] = {0};
+        long r_u = kekcall(KEKCALL_DUMP_MEM, our_ucred, (uintptr_t)ucred_buf, sizeof(ucred_buf));
+        klog_printf("[UCRED] our_ucred=0x%llx dump_ret=%ld\n",
+                    (unsigned long long)our_ucred, r_u);
+        for (int b = 0; b < 128; b += 16) {
+            klog_printf("[UCRED+0x%03x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                        b,
+                        ucred_buf[b+0], ucred_buf[b+1], ucred_buf[b+2], ucred_buf[b+3],
+                        ucred_buf[b+4], ucred_buf[b+5], ucred_buf[b+6], ucred_buf[b+7],
+                        ucred_buf[b+8], ucred_buf[b+9], ucred_buf[b+10], ucred_buf[b+11],
+                        ucred_buf[b+12], ucred_buf[b+13], ucred_buf[b+14], ucred_buf[b+15]);
+        }
+
+        uint32_t cr_uid        = *(uint32_t*)(ucred_buf + 0x04);
+        uint32_t cr_ruid       = *(uint32_t*)(ucred_buf + 0x08);
+        uint32_t cr_svuid      = *(uint32_t*)(ucred_buf + 0x0c);
+        uint64_t cr_prison     = *(uint64_t*)(ucred_buf + 0x30);
+        uint64_t cr_sce_authid = *(uint64_t*)(ucred_buf + 0x58);
+        uint64_t cr_label      = *(uint64_t*)(ucred_buf + 0x78);
+
+        klog_printf("[UCRED_FIELDS] cr_uid=%u cr_ruid=%u cr_svuid=%u\n",
+                    cr_uid, cr_ruid, cr_svuid);
+        klog_printf("[UCRED_FIELDS] cr_prison=0x%llx cr_sce_authid=0x%llx cr_label=0x%llx\n",
+                    (unsigned long long)cr_prison,
+                    (unsigned long long)cr_sce_authid,
+                    (unsigned long long)cr_label);
+
+        if (cr_label) {
+            uint8_t lbl_buf[64] = {0};
+            long r_l = kekcall(KEKCALL_DUMP_MEM, cr_label, (uintptr_t)lbl_buf, sizeof(lbl_buf));
+            klog_printf("[MAC_LABEL] cr_label=0x%llx dump_ret=%ld\n",
+                        (unsigned long long)cr_label, r_l);
+            for (int b = 0; b < 64; b += 16) {
+                klog_printf("[MAC_LABEL+0x%02x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                            b,
+                            lbl_buf[b+0], lbl_buf[b+1], lbl_buf[b+2], lbl_buf[b+3],
+                            lbl_buf[b+4], lbl_buf[b+5], lbl_buf[b+6], lbl_buf[b+7],
+                            lbl_buf[b+8], lbl_buf[b+9], lbl_buf[b+10], lbl_buf[b+11],
+                            lbl_buf[b+12], lbl_buf[b+13], lbl_buf[b+14], lbl_buf[b+15]);
+            }
+        } else {
+            klog_printf("[MAC_LABEL] cr_label=0 — no MAC policy label attached\n");
+        }
+    } else {
+        klog_printf("[UCRED] ERROR: our_ucred=0 — skipping ucred dump\n");
+    }
+    klog_printf("[NATIVE_OPEN] === END probe ===\n");
 
 
 
