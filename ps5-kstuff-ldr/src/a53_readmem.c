@@ -1542,6 +1542,80 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                         md_err = errno;
                         klog_printf("[MP4_DUMP_OPEN] O_RDONLY fd=%d errno=%d\n", md_fd, md_err);
                     }
+                    if (md_fd < 0) {
+                        /* First open failed — mp4/dump has a DIFFERENT cdevsw than
+                         * mp4/dump_for_decid. Find and patch IT separately.
+                         * Offset: kbase + 0x1f2ddb0 (found offline in kdump near
+                         * make_dev("mp4/dump", ...) call site at kbase - 0x9b0f0). */
+                        uint64_t md_kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+                        if (md_kbase > 0xffffffff00000000ULL) {
+                            uint64_t md_csw = md_kbase + 0x1f2ddb0ULL;
+                            klog_printf("[MP4_DUMP_CSW] expected csw @ 0x%llx (kbase+0x1f2ddb0)\n",
+                                        (unsigned long long)md_csw);
+                            /* Dump 32 bytes of cdevsw to verify + get d_open at +0x10 */
+                            uint64_t csw_fields[8] = {0};
+                            kekcall(KEKCALL_DUMP_MEM, md_csw, (uintptr_t)csw_fields, sizeof(csw_fields));
+                            klog_printf("[MP4_DUMP_CSW] +0x00=0x%llx +0x08=0x%llx +0x10=0x%llx (d_open) +0x18=0x%llx\n",
+                                        (unsigned long long)csw_fields[0],
+                                        (unsigned long long)csw_fields[1],
+                                        (unsigned long long)csw_fields[2],
+                                        (unsigned long long)csw_fields[3]);
+                            uint64_t md_d_open = csw_fields[2];
+                            if ((md_d_open >> 48) == 0xffff && md_d_open >= 0xffff800000000000ULL) {
+                                /* Resolve real_dopen via trampoline (e9 rel32 jmp) */
+                                uint8_t tramp_bytes[8] = {0};
+                                kekcall(KEKCALL_DUMP_MEM, md_d_open, (uintptr_t)tramp_bytes, 8);
+                                klog_printf("[MP4_DUMP_CSW] d_open bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                            tramp_bytes[0],tramp_bytes[1],tramp_bytes[2],tramp_bytes[3],
+                                            tramp_bytes[4],tramp_bytes[5],tramp_bytes[6],tramp_bytes[7]);
+                                uint64_t md_real_dopen = md_d_open;
+                                if (tramp_bytes[0] == 0xe9) {
+                                    int32_t rel = (int32_t)(tramp_bytes[1] | (tramp_bytes[2]<<8) |
+                                                             (tramp_bytes[3]<<16) | (tramp_bytes[4]<<24));
+                                    md_real_dopen = md_d_open + 5 + (int64_t)rel;
+                                    klog_printf("[MP4_DUMP_CSW] trampoline resolved real_dopen=0x%llx\n",
+                                                (unsigned long long)md_real_dopen);
+                                }
+                                /* Try the same DOPEN_JMP recipe: read qword at real_dopen+0x18,
+                                 * if it matches canonical, patch to jmp +0x51. */
+                                uint64_t md_patch_addr = md_real_dopen + 0x18;
+                                uint64_t md_orig = 0;
+                                kekcall(KEKCALL_DUMP_MEM, md_patch_addr, (uintptr_t)&md_orig, 8);
+                                klog_printf("[MP4_DUMP_CSW] bytes @ real_dopen+0x18: 0x%016llx\n",
+                                            (unsigned long long)md_orig);
+                                /* If it looks like `call target1` (0xe8 opcode in low byte): patch */
+                                if ((md_orig & 0xff) == 0xe8) {
+                                    uint64_t md_patch_val = (md_orig & 0xffffff0000000000ULL) |
+                                                             0x00000000000051e9ULL;
+                                    long wr = kekcall(27, md_patch_addr, md_patch_val, 0);
+                                    uint64_t rb = 0;
+                                    kekcall(KEKCALL_DUMP_MEM, md_patch_addr, (uintptr_t)&rb, 8);
+                                    klog_printf("[MP4_DUMP_PATCH] wr=%ld val=0x%016llx rb=0x%016llx %s\n",
+                                                wr, (unsigned long long)md_patch_val,
+                                                (unsigned long long)rb,
+                                                (rb == md_patch_val) ? "OK" : "FAIL");
+                                    if (rb == md_patch_val) {
+                                        errno = 0;
+                                        md_fd = open("/dev/mp4/dump", O_RDWR);
+                                        klog_printf("[MP4_DUMP_OPEN2] after mp4/dump csw patch: fd=%d errno=%d\n",
+                                                    md_fd, errno);
+                                        if (md_fd < 0) {
+                                            errno = 0;
+                                            md_fd = open("/dev/mp4/dump", O_RDONLY);
+                                            klog_printf("[MP4_DUMP_OPEN2] O_RDONLY: fd=%d errno=%d\n",
+                                                        md_fd, errno);
+                                        }
+                                        /* Restore ALWAYS */
+                                        kekcall(27, md_patch_addr, md_orig, 0);
+                                        klog_printf("[MP4_DUMP_PATCH] restored to 0x%016llx\n",
+                                                    (unsigned long long)md_orig);
+                                    }
+                                } else {
+                                    klog_printf("[MP4_DUMP_CSW] +0x18 is not `call` opcode — skip patch\n");
+                                }
+                            }
+                        }
+                    }
                     if (md_fd >= 0) {
                         klog_printf("[MP4_DUMP_OPEN] *** SUCCESS *** /dev/mp4/dump opened (fd=%d)\n", md_fd);
                         /* Try all 6 ioctl cmds on this device. The handler is in the
