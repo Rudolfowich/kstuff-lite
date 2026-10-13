@@ -1110,38 +1110,27 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         /* Надежный curproc: scanned_proc получен из KEKCALL_SCAN_TD_UCRED */
         uint64_t my_curproc = scanned_proc;
         uint64_t p_fd = 0;
-        int p_fd_off = -1;
 
         if (my_curproc) {
-            uint8_t pbuf[0x400] = {0};
-            kekcall(KEKCALL_DUMP_MEM, my_curproc, (uintptr_t)pbuf, 0x400);
-            for (int off = 0; off < 0x400; off += 8) {
-                uint64_t v = *(uint64_t*)(pbuf + off);
-                if ((v >> 48) == 0xffff) {
-                    uint64_t next = 0;
-                    kekcall(KEKCALL_DUMP_MEM, v + 0x08ULL, (uintptr_t)&next, 8);
-                    int is_fd = ((next >> 48) == 0xffff);
-                    klog_printf("[P_SCAN] proc+0x%03x = 0x%llx next=0x%llx %s\n",
-                                off, (unsigned long long)v, (unsigned long long)next,
-                                is_fd ? "CANDIDATE" : "");
-                    if (is_fd && !p_fd) {
-                        p_fd = v;
-                        p_fd_off = off;
-                    }
-                }
-            }
+            kekcall(KEKCALL_DUMP_MEM, my_curproc + 0x48ULL, (uintptr_t)&p_fd, 8);
         }
-        klog_printf("[P_FD_FOUND] offset=0x%x p_fd=0x%llx\n", p_fd_off, (unsigned long long)p_fd);
+        klog_printf("[P_FD_EXACT] proc+0x48 -> p_fd=0x%llx\n", (unsigned long long)p_fd);
 
         uint64_t fp_mp4 = 0, fp_ioc = 0;
-        if (p_fd && fd_mp4 >= 0) {
-            uint64_t fd_ofiles = 0;
-            kekcall(KEKCALL_DUMP_MEM, p_fd + 0x08ULL, (uintptr_t)&fd_ofiles, 8);
-            klog_printf("[FILE_TEST] fd_ofiles=0x%llx\n", (unsigned long long)fd_ofiles);
+        if (p_fd && (p_fd >> 48) == 0xffff && fd_mp4 >= 0) {
+            /* Читаем заголовок struct filedesc (первые 64 байта) */
+            uint64_t fd_hdr[8] = {0};
+            kekcall(KEKCALL_DUMP_MEM, p_fd, (uintptr_t)fd_hdr, sizeof(fd_hdr));
+            for (int i = 0; i < 8; i++) {
+                klog_printf("[FILEDESC+0x%02x] = 0x%016llx\n", i * 8, (unsigned long long)fd_hdr[i]);
+            }
+
+            /* fdt_ofiles обычно лежит на +0x00 или +0x08 */
+            uint64_t fd_ofiles = ((fd_hdr[1] >> 48) == 0xffff) ? fd_hdr[1] : fd_hdr[0];
+            klog_printf("[FILE_TEST] selected fd_ofiles=0x%llx\n", (unsigned long long)fd_ofiles);
 
             if ((fd_ofiles >> 48) == 0xffff) {
-                /* Во FreeBSD 12 / PS5 ofiles - это массив struct fdescent (size 0x20 или 0x30)
-                 * Пробуем strides 0x20, 0x18, 0x10 */
+                /* Во FreeBSD / PS5 массив fdescent: пробуем strides 0x20, 0x18, 0x10, 0x08 */
                 uint64_t candidates_mp4[4] = {0};
                 kekcall(KEKCALL_DUMP_MEM, fd_ofiles + (uint64_t)fd_mp4 * 0x20ULL, (uintptr_t)&candidates_mp4[0], 8);
                 kekcall(KEKCALL_DUMP_MEM, fd_ofiles + (uint64_t)fd_mp4 * 0x18ULL, (uintptr_t)&candidates_mp4[1], 8);
