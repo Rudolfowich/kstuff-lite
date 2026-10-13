@@ -3485,17 +3485,50 @@ install_ppr_a53(uint32_t system_fw_version)
 
             /* 3. A_23 — 32-byte readback (unexplored, may be mem-read) */
             {
-                uint8_t rb[32] = {0};
+                uint8_t rb[32];
+                __builtin_memset(rb, 0, sizeof(rb));
                 errno = 0;
                 int r = ioctl(pfd, 0x40204117, rb);
-                klog_printf("[A53_PROBE] A_23 ret=%d errno=%d\n", r, errno);
-                for (int i = 0; i < 32; i += 16) {
-                    klog_printf("[A23+%02x] %02x %02x %02x %02x %02x %02x %02x %02x "
-                                "%02x %02x %02x %02x %02x %02x %02x %02x\n", i,
-                                rb[i+0],rb[i+1],rb[i+2],rb[i+3],
-                                rb[i+4],rb[i+5],rb[i+6],rb[i+7],
-                                rb[i+8],rb[i+9],rb[i+10],rb[i+11],
-                                rb[i+12],rb[i+13],rb[i+14],rb[i+15]);
+                int e = errno;
+                /* Single-line dump to survive printf truncation issues */
+                klog_printf("[A53_PROBE] A_23 ret=%d errno=%d\n", r, e);
+                klog_printf("[A23A] %02x%02x%02x%02x %02x%02x%02x%02x "
+                            "%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                            rb[0],rb[1],rb[2],rb[3],rb[4],rb[5],rb[6],rb[7],
+                            rb[8],rb[9],rb[10],rb[11],rb[12],rb[13],rb[14],rb[15]);
+                klog_printf("[A23B] %02x%02x%02x%02x %02x%02x%02x%02x "
+                            "%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                            rb[16],rb[17],rb[18],rb[19],rb[20],rb[21],rb[22],rb[23],
+                            rb[24],rb[25],rb[26],rb[27],rb[28],rb[29],rb[30],rb[31]);
+            }
+
+            /* 3b. KEKCALL_A53_DUMP — try with large buf */
+            {
+                uint64_t dumpbuf[256] = {0};
+                long rc = kekcall(8 /*A53_DUMP*/, (uint64_t)dumpbuf, 256, 0);
+                klog_printf("[A53_PROBE] kekcall(8) ret=%ld words\n", rc);
+                for (long i = 0; i < rc && i < 32; i++) {
+                    klog_printf("[K8+%03lx] 0x%016llx\n", i*8,
+                                (unsigned long long)dumpbuf[i]);
+                }
+            }
+
+            /* 3c. Try all remaining 'A' group ioctls read-only mode */
+            {
+                struct { uint32_t cmd; const char *name; int bufsz; } probes[] = {
+                    { 0x4008411f, "A_31 (IOR 8)", 8 },
+                    { 0x40084120, "A_32 (IOR 8)", 8 },
+                    { 0x40084128, "A_40 (IOR 8)", 8 },
+                    { 0x40084129, "A_41 (IOR 8)", 8 },
+                };
+                for (unsigned i = 0; i < sizeof(probes)/sizeof(probes[0]); i++) {
+                    uint8_t rb[32] = {0};
+                    errno = 0;
+                    int r = ioctl(pfd, probes[i].cmd, rb);
+                    klog_printf("[A53_PROBE] %s cmd=0x%x ret=%d errno=%d: "
+                                "%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                probes[i].name, probes[i].cmd, r, errno,
+                                rb[0],rb[1],rb[2],rb[3],rb[4],rb[5],rb[6],rb[7]);
                 }
             }
 
@@ -3532,26 +3565,36 @@ install_ppr_a53(uint32_t system_fw_version)
                 }
             }
 
-            /* 5. A_14 "region define" — try defining A53 target address 0x04e5cf00
-             * then read what comes back. */
+            /* 5. A_14 "region define" — try multiple buffer formats */
             {
-                uint32_t def[5] = { 0x14, 0x04e5cf00, 0, 0x100, 0 };  /* size=20, addr, 0, len=256, 0 */
-                errno = 0;
-                int r = ioctl(pfd, 0x8014410d, def);
-                klog_printf("[A53_PROBE] A_14 region-define @0x04e5cf00 ret=%d errno=%d\n",
-                            r, errno);
-                /* Try reading after define */
-                uint8_t buf[256] = {0};
-                errno = 0;
-                ssize_t nr = read(pfd, buf, sizeof(buf));
-                klog_printf("[A53_PROBE] A_14 followup read nr=%zd errno=%d\n", nr, errno);
-                for (int i = 0; i < 128 && i < (int)nr; i += 16) {
-                    klog_printf("[A14_READ+%03x] %02x %02x %02x %02x %02x %02x %02x %02x "
-                                "%02x %02x %02x %02x %02x %02x %02x %02x\n", i,
-                                buf[i+0],buf[i+1],buf[i+2],buf[i+3],
-                                buf[i+4],buf[i+5],buf[i+6],buf[i+7],
-                                buf[i+8],buf[i+9],buf[i+10],buf[i+11],
-                                buf[i+12],buf[i+13],buf[i+14],buf[i+15]);
+                /* Try layouts: {size, addr, len, ...} variations */
+                struct { uint32_t buf[5]; const char *fmt; } tries[] = {
+                    {{ 0x14, 0x04e5cf00, 0, 0x100, 0 }, "{0x14, addr, 0, len, 0}"},
+                    {{ 0x14, 0, 0x04e5cf00, 0x100, 0 }, "{0x14, 0, addr, len, 0}"},
+                    {{ 0x14, 0x04e5cf00, 0x100, 0, 0 }, "{0x14, addr, len, 0, 0}"},
+                    {{ 0x14, 0, 0, 0x04e5cf00, 0x100 }, "{0x14, 0, 0, addr, len}"},
+                    {{ 0x08, 0x04e5cf00, 0, 0, 0 }, "size8-{addr}"},
+                };
+                for (unsigned i = 0; i < sizeof(tries)/sizeof(tries[0]); i++) {
+                    errno = 0;
+                    int r = ioctl(pfd, 0x8014410d, tries[i].buf);
+                    klog_printf("[A14_%u] fmt='%s' ret=%d errno=%d\n",
+                                i, tries[i].fmt, r, errno);
+                }
+            }
+
+            /* 6. Try mmap on mp4/dump */
+            {
+                void *m = mmap(NULL, 4096, PROT_READ, MAP_SHARED, pfd, 0);
+                int me = errno;
+                klog_printf("[A53_PROBE] mmap(4096, PROT_READ) = %p errno=%d\n",
+                            m, me);
+                if (m != MAP_FAILED && m != NULL) {
+                    uint32_t w0, w1;
+                    __builtin_memcpy(&w0, m, 4);
+                    __builtin_memcpy(&w1, (uint8_t*)m + 4, 4);
+                    klog_printf("[MMAP] first 2 u32: 0x%08x 0x%08x\n", w0, w1);
+                    munmap(m, 4096);
                 }
             }
 
