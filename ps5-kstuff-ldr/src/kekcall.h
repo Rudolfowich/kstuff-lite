@@ -26,6 +26,8 @@
 #define KEKCALL_ENUM_ALLPROC      29
 #define KEKCALL_SWAP_BY_UCRED     30
 #define KEKCALL_SCAN_TD_UCRED     31
+#define KEKCALL_DIFF_TEST         32
+#define KEKCALL_RESTORE_DIFF      33
 
 static inline long
 kekcall(uint32_t nr, uint64_t a1, uint64_t a2, uint64_t a3)

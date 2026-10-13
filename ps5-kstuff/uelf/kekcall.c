@@ -1035,6 +1035,112 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = ((uint64_t)p_ucred_off << 32) | td_ucred_off;
         return 0;
     }
+    else if(nr == 32)
+    {
+        /* KEKCALL_DIFF_AND_PRISON_TEST:
+         * Выполняет diff между our_ucred и video_ucred (64 qwords),
+         * складывает различия в user_buf, патчит cr_prison и p_flag.
+         * args[RDI] = video_ucred
+         * args[RSI] = user_buf (размер >= 1024 байта)
+         * args[RDX] = flags (1 = patch prison, 2 = patch p_flag, 3 = both)
+         * regs[RDI] = curthread */
+        uint64_t video_ucred = args[RDI];
+        uint64_t user_buf    = args[RSI];
+        uint64_t flags       = args[RDX];
+        uint64_t td          = regs[RDI];
+        uint64_t proc        = 0;
+        kpeek64_checked(td + 0x08, &proc);
+
+        uint64_t our_ucred = 0;
+        kpeek64_checked(td + 0x140, &our_ucred);
+
+        if (!our_ucred || !video_ucred || !user_buf) return EINVAL;
+
+        /* Буфер результатов:
+         * [0] = diff_count
+         * [1] = prison_offset
+         * [2] = old_prison
+         * [3] = new_prison
+         * [4] = orig_pflag
+         * [5] = new_pflag
+         * [6..] = пары diff: offset, our_val, video_val (3 qwords на запись) */
+        uint64_t out[128] = {0};
+        uint32_t diff_cnt = 0;
+        uint32_t prison_off = 0;
+        uint64_t cand_prison = 0;
+
+        for (uint32_t i = 0; i < 512 && diff_cnt < 32; i += 8) {
+            uint64_t o = 0, v = 0;
+            kpeek64_checked(our_ucred + i, &o);
+            kpeek64_checked(video_ucred + i, &v);
+            if (o != v) {
+                out[6 + diff_cnt * 3 + 0] = (uint64_t)i;
+                out[6 + diff_cnt * 3 + 1] = o;
+                out[6 + diff_cnt * 3 + 2] = v;
+                diff_cnt++;
+
+                /* Ищем cr_prison: указатель ядра (0xffff...) в диапазоне +0x28..+0x50 */
+                if (i >= 0x28 && i <= 0x50 && (v >> 48) == 0xffff && !cand_prison) {
+                    cand_prison = v;
+                    prison_off = i;
+                }
+            }
+        }
+        out[0] = (uint64_t)diff_cnt;
+        out[1] = (uint64_t)prison_off;
+        out[3] = cand_prison;
+
+        /* Тест 2: Подмена cr_prison */
+        if ((flags & 1) && prison_off && cand_prison) {
+            uint64_t old_p = 0;
+            kpeek64_checked(our_ucred + prison_off, &old_p);
+            out[2] = old_p;
+            kpoke64(our_ucred + prison_off, cand_prison);
+        }
+
+        /* Тест 3: Установка P_SYSTEM (0x200) в proc + 0xb4 */
+        if ((flags & 2) && proc) {
+            uint64_t cur_pflag = 0;
+            kpeek64_checked(proc + 0xB0, &cur_pflag);
+            out[4] = cur_pflag;
+            uint64_t new_pflag = cur_pflag | 0x200ULL;
+            kpoke64(proc + 0xB0, new_pflag);
+            out[5] = new_pflag;
+        }
+
+        if (copy_to_kernel(user_buf, out, sizeof(out)))
+            return EFAULT;
+
+        args[RAX] = 0;
+        return 0;
+    }
+    else if(nr == 33)
+    {
+        /* KEKCALL_RESTORE_DIFF_TEST:
+         * Восстанавливает cr_prison и p_flag из сохранённых значений.
+         * args[RDI] = prison_offset
+         * args[RSI] = old_prison
+         * args[RDX] = orig_pflag */
+        uint32_t prison_off = (uint32_t)args[RDI];
+        uint64_t old_prison = args[RSI];
+        uint64_t orig_pflag = args[RDX];
+        uint64_t td         = regs[RDI];
+        uint64_t proc       = 0;
+        kpeek64_checked(td + 0x08, &proc);
+
+        uint64_t our_ucred = 0;
+        kpeek64_checked(td + 0x140, &our_ucred);
+
+        if (our_ucred && prison_off && old_prison) {
+            kpoke64(our_ucred + prison_off, old_prison);
+        }
+        if (proc && orig_pflag) {
+            kpoke64(proc + 0xB0, orig_pflag);
+        }
+
+        args[RAX] = 0;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;
