@@ -3427,6 +3427,139 @@ install_ppr_a53(uint32_t system_fw_version)
      * Run EARLY — before the massive diagnostic probe below — because
      * the probe can take minutes and may trigger a watchdog TMR violation.
      * ================================================================== */
+    /* ================================================================
+     * A53 READ-ONLY PROBE — non-destructive diagnostic to learn what
+     * mp4/dump returns on 13.60 via read()/A_23/A_14.
+     *
+     * Needs DAC patches first. Does zero writes to A53 memory.
+     * Expected to be safe: PS5 should remain fully functional after.
+     * ================================================================ */
+    {
+        klog_puts("[A53_PROBE] starting non-destructive A53 read probe\n");
+        /* Inline DAC patches (same as apply_profile does) */
+        uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+        if (kbase > 0xffffffff00000000ULL) {
+            uint64_t daddr_open  = (kbase - 0x8dcf0ULL) + 0x18ULL;
+            uint64_t daddr_ioctl = (kbase - 0x8dbd0ULL) + 0x30ULL;
+            uint64_t qw;
+            qw = 0; kekcall(KEKCALL_DUMP_MEM, daddr_open, (uintptr_t)&qw, 8);
+            if (((uint8_t)(qw >> 56)) == 0x74) {
+                kekcall(27, daddr_open, (qw & ~(0xffULL << 56)) | (0x75ULL << 56), 0);
+                klog_puts("[A53_PROBE] d_open patched\n");
+            }
+            qw = 0; kekcall(KEKCALL_DUMP_MEM, daddr_ioctl, (uintptr_t)&qw, 8);
+            if (((uint8_t)(qw >> 24)) == 0x74) {
+                kekcall(27, daddr_ioctl, (qw & ~(0xffULL << 24)) | (0x75ULL << 24), 0);
+                klog_puts("[A53_PROBE] d_ioctl patched\n");
+            }
+        }
+
+        int pfd = open("/dev/mp4/dump", O_RDWR);
+        if (pfd < 0) {
+            klog_printf("[A53_PROBE] open failed errno=%d\n", errno);
+        } else {
+            klog_printf("[A53_PROBE] fd=%d open OK\n", pfd);
+
+            /* 1. Preflight A_11 ping (needed by some A53 states before reads) */
+            {
+                uint32_t ping[3] = { 0x0c, 0, 0 };
+                errno = 0;
+                int r = ioctl(pfd, 0x800c410b, ping);
+                klog_printf("[A53_PROBE] A_11 ping ret=%d errno=%d\n", r, errno);
+            }
+
+            /* 2. A_21 bare */
+            {
+                uint8_t rb[24] = {0};
+                errno = 0;
+                int r = ioctl(pfd, 0x40184115, rb);
+                klog_printf("[A53_PROBE] A_21 ret=%d errno=%d: "
+                            "%02x %02x %02x %02x %02x %02x %02x %02x  "
+                            "%02x %02x %02x %02x %02x %02x %02x %02x  "
+                            "%02x %02x %02x %02x %02x %02x %02x %02x\n",
+                            r, errno,
+                            rb[0],rb[1],rb[2],rb[3],rb[4],rb[5],rb[6],rb[7],
+                            rb[8],rb[9],rb[10],rb[11],rb[12],rb[13],rb[14],rb[15],
+                            rb[16],rb[17],rb[18],rb[19],rb[20],rb[21],rb[22],rb[23]);
+            }
+
+            /* 3. A_23 — 32-byte readback (unexplored, may be mem-read) */
+            {
+                uint8_t rb[32] = {0};
+                errno = 0;
+                int r = ioctl(pfd, 0x40204117, rb);
+                klog_printf("[A53_PROBE] A_23 ret=%d errno=%d\n", r, errno);
+                for (int i = 0; i < 32; i += 16) {
+                    klog_printf("[A23+%02x] %02x %02x %02x %02x %02x %02x %02x %02x "
+                                "%02x %02x %02x %02x %02x %02x %02x %02x\n", i,
+                                rb[i+0],rb[i+1],rb[i+2],rb[i+3],
+                                rb[i+4],rb[i+5],rb[i+6],rb[i+7],
+                                rb[i+8],rb[i+9],rb[i+10],rb[i+11],
+                                rb[i+12],rb[i+13],rb[i+14],rb[i+15]);
+                }
+            }
+
+            /* 4. read(fd, 4096) — expects 'mp40' magic + possible A53 memory snapshot */
+            {
+                uint8_t *buf = calloc(1, 4096);
+                if (buf) {
+                    errno = 0;
+                    ssize_t nr = read(pfd, buf, 4096);
+                    klog_printf("[A53_PROBE] read(4096) nr=%zd errno=%d\n", nr, errno);
+                    /* Dump first 256 bytes */
+                    for (int i = 0; i < 256 && i < (int)nr; i += 16) {
+                        klog_printf("[READ+%03x] %02x %02x %02x %02x %02x %02x %02x %02x "
+                                    "%02x %02x %02x %02x %02x %02x %02x %02x\n", i,
+                                    buf[i+0],buf[i+1],buf[i+2],buf[i+3],
+                                    buf[i+4],buf[i+5],buf[i+6],buf[i+7],
+                                    buf[i+8],buf[i+9],buf[i+10],buf[i+11],
+                                    buf[i+12],buf[i+13],buf[i+14],buf[i+15]);
+                    }
+                    /* Scan for any 0x04e5xxxx-looking refs */
+                    uint32_t sram_hits = 0;
+                    for (int i = 0; i + 4 <= (int)nr; i += 4) {
+                        uint32_t w;
+                        __builtin_memcpy(&w, buf + i, 4);
+                        if ((w & 0xffff0000) == 0x04e50000 || (w & 0xffff0000) == 0x04e20000) {
+                            if (sram_hits < 10) {
+                                klog_printf("[READ_SRAM_REF+%03x] = 0x%08x\n", i, w);
+                            }
+                            sram_hits++;
+                        }
+                    }
+                    klog_printf("[A53_PROBE] SRAM-like refs in read(): %u\n", sram_hits);
+                    free(buf);
+                }
+            }
+
+            /* 5. A_14 "region define" — try defining A53 target address 0x04e5cf00
+             * then read what comes back. */
+            {
+                uint32_t def[5] = { 0x14, 0x04e5cf00, 0, 0x100, 0 };  /* size=20, addr, 0, len=256, 0 */
+                errno = 0;
+                int r = ioctl(pfd, 0x8014410d, def);
+                klog_printf("[A53_PROBE] A_14 region-define @0x04e5cf00 ret=%d errno=%d\n",
+                            r, errno);
+                /* Try reading after define */
+                uint8_t buf[256] = {0};
+                errno = 0;
+                ssize_t nr = read(pfd, buf, sizeof(buf));
+                klog_printf("[A53_PROBE] A_14 followup read nr=%zd errno=%d\n", nr, errno);
+                for (int i = 0; i < 128 && i < (int)nr; i += 16) {
+                    klog_printf("[A14_READ+%03x] %02x %02x %02x %02x %02x %02x %02x %02x "
+                                "%02x %02x %02x %02x %02x %02x %02x %02x\n", i,
+                                buf[i+0],buf[i+1],buf[i+2],buf[i+3],
+                                buf[i+4],buf[i+5],buf[i+6],buf[i+7],
+                                buf[i+8],buf[i+9],buf[i+10],buf[i+11],
+                                buf[i+12],buf[i+13],buf[i+14],buf[i+15]);
+                }
+            }
+
+            close(pfd);
+            klog_puts("[A53_PROBE] fd closed, probe done\n");
+        }
+    }
+
     klog_printf("[a53] apply_profile (A53_DRY_RUN=%d)\n", A53_DRY_RUN);
     {
         struct a53_apply_ctx actx;
