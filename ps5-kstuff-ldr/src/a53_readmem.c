@@ -543,8 +543,25 @@ probe_opened_mp4_fd(int fd, const char *name)
         long r_info = kekcall(KEKCALL_GET_FD_INFO, (uint64_t)fd, (uint64_t)fd_ref, (uintptr_t)fd_info);
         uint64_t fp_live = fd_info[2];
         uint64_t fp_ref  = fd_info[3];
-        klog_printf("[LIVE_FP] ret=%ld fp_live=0x%llx fp_ref=0x%llx\n",
-                    r_info, (unsigned long long)fp_live, (unsigned long long)fp_ref);
+
+        /* Если fp_live на точном слоте пуст, берём найденный в fdt живой дескриптор */
+        if (!fp_live || (fp_live >> 48) != 0xffff) {
+            /* Проверяем слоты fdt: +0x58 (индекс 5+9), +0x50 (5+8), +0x48 (5+7) */
+            if ((fd_info[5 + 9] >> 48) == 0xffff && (fd_info[5 + 9] >> 40) != 0xffffff) {
+                fp_live = fd_info[5 + 9];
+            } else {
+                for (int s = 2; s < 16; s++) {
+                    uint64_t cand = fd_info[5 + s];
+                    if ((cand >> 48) == 0xffff && (cand >> 40) != 0xffffff && cand != fp_ref) {
+                        fp_live = cand;
+                        break;
+                    }
+                }
+            }
+        }
+
+        klog_printf("[LIVE_FP] resolved: fp_live=0x%llx fp_ref=0x%llx\n",
+                    (unsigned long long)fp_live, (unsigned long long)fp_ref);
 
         if (fp_live && (fp_live >> 48) == 0xffff) {
             uint64_t diff_table[32] = {0};
