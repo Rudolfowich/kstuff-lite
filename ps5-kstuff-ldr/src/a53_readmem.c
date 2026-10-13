@@ -3142,6 +3142,237 @@ probe_mp4_device(uint64_t curproc_hint)
     return 0;
 }
 
+/* ====================================================================
+ * apply_profile — walker for drakmor's 400-byte PPR profile.
+ *
+ * Model (SOLID, from test6 reverse):
+ *   - A_11 ioctl is the write primitive: {u32 size=12, u32 word1=target_addr,
+ *     u32 word0=value}. Kernel's d_ioctl handler extracts (addr,value) and
+ *     signals A53 to perform the 32-bit write.
+ *   - Profile layout (profile 55 example):
+ *       +0x00  u32 fw_id
+ *       +0x14  u32 extra_asm_flag (0 for fast path)
+ *       +0x18  u32 full_patch_flag (0 for fast path)
+ *       +0x20  Segment 0 descriptor (base, mapA, mapB, size)
+ *       +0x40  Segment 1 descriptor
+ *       +0x58  u64 sram_base (destination for stub emission)
+ *       +0x58..+0xd8  SRAM branch bases (13 u64)
+ *       +0xe0..+0x118 Code BL targets (8 u64)
+ *       +0x120..+0x148 10 pre-encoded BL instructions (packed u64 pairs)
+ *       +0x148..+0x188 Extra (addr, instr) pairs
+ *   - Walker builds a 0x148-byte stub buffer, then emits each non-zero u32
+ *     slot as one A_11 write at (sram_base + stub_offset).
+ *
+ * SAFETY: default A53_DRY_RUN=1 → logs would-be writes but never calls ioctl.
+ * ==================================================================== */
+
+#ifndef A53_DRY_RUN
+#define A53_DRY_RUN 1
+#endif
+
+/* ARM64 B/BL encoder. opcode = 0x14000000 (B) or 0x94000000 (BL). */
+static int
+a53_enc_branch(uint64_t target, uint64_t site_pc, uint32_t opcode, uint32_t *out)
+{
+    if ((target & 3) || (site_pc & 3))
+        return -1;
+    int64_t d = (int64_t)target - (int64_t)site_pc;
+    if (d < -0x08000000 || d > 0x07FFFFFC)
+        return -2;
+    *out = opcode | ((uint32_t)(d >> 2) & 0x03FFFFFFu);
+    return 0;
+}
+
+/* 21 hand-wired patch records from install_ppr_a53 @ VMA 0x9eb0 reverse.
+ * Each: (base_slot, target_slot, site_pc_off, dst_slot, opcode).
+ *   base_slot:   profile offset of base address (u64)
+ *   target_slot: profile offset of branch target (u64)
+ *   site_pc_off: added to base to form the actual branch site PC
+ *   dst_slot:    byte offset into stub[0x148] where encoded instr goes
+ *   opcode:      0x14000000 (B) or 0x94000000 (BL)
+ */
+struct a53_patch_rec {
+    uint16_t base_slot;
+    uint16_t target_slot;
+    uint16_t site_pc_off;
+    uint16_t dst_slot;
+    uint32_t opcode;
+};
+
+static const struct a53_patch_rec A53_INLINE_RECS[21] = {
+    { 0x58, 0x68, 0x28, 0x038, 0x14000000 },
+    { 0x58, 0x98, 0x38, 0x048, 0x14000000 },
+    { 0x58, 0x90, 0x3c, 0x04c, 0x14000000 },
+    { 0x60, 0xb0, 0x1c, 0x078, 0x94000000 },
+    { 0x60, 0xc0, 0x70, 0x0cc, 0x94000000 },
+    { 0x60, 0xb8, 0x84, 0x0e0, 0x14000000 },
+    { 0x58, 0xd0, 0x00, 0x0fc, 0x94000000 },
+    { 0x58, 0xd8, 0x00, 0x100, 0x94000000 },
+    { 0x58, 0xe0, 0x00, 0x104, 0x94000000 },
+    { 0x58, 0xe8, 0x00, 0x108, 0x94000000 },
+    { 0x58, 0xf0, 0x00, 0x10c, 0x94000000 },
+    { 0x58, 0xf8, 0x00, 0x110, 0x94000000 },
+    { 0x58, 0x100,0x00, 0x114, 0x94000000 },
+    { 0x58, 0x108,0x00, 0x118, 0x94000000 },
+    { 0x58, 0x110,0x00, 0x11c, 0x94000000 },
+    { 0x58, 0x118,0x00, 0x120, 0x94000000 },
+    { 0x58, 0x148,0x2c, 0x124, 0x94000000 },
+    { 0x58, 0x150,0x2c, 0x128, 0x94000000 },
+    { 0x60, 0x160,0x00, 0x12c, 0x94000000 },
+    { 0x58, 0x170,0x24, 0x130, 0x94000000 },
+    { 0x58, 0x180,0x00, 0x134, 0x94000000 },
+};
+
+/* 5 hardcoded ARM64 instrs for the extra_asm_flag path. */
+struct a53_extra_asm { uint16_t off; uint32_t instr; };
+static const struct a53_extra_asm A53_EXTRA_ASM[5] = {
+    { 0x7c, 0x79404408 },  /* LDRH W8,[X0,#0x22] */
+    { 0x88, 0xb9440809 },
+    { 0xa4, 0x7908c148 },
+    { 0xac, 0xf9430009 },
+    { 0xbc, 0xf9030009 },
+};
+
+/* State for apply_profile. */
+struct a53_apply_ctx {
+    int    fd;              /* /dev/mp4/dump fd, or -1 for dry run */
+    int    dry_run;
+    uint32_t writes_ok;
+    uint32_t writes_fail;
+};
+
+/* Single A_11 emission. In dry_run just logs. */
+static int
+a53_emit_write(struct a53_apply_ctx *ctx, uint64_t addr, uint32_t value)
+{
+    if (ctx->dry_run) {
+        klog_printf("[APPLY_DRY] A_11 addr=0x%016llx value=0x%08x\n",
+                    (unsigned long long)addr, value);
+        ctx->writes_ok++;
+        return 0;
+    }
+
+    /* Real A_11: {u32 size=12, u32 word1=addr_low32, u32 word0=value}.
+     * Note: kernel's A_11 handler takes a 32-bit address in word1 and
+     * 32-bit value in word0. For 64-bit targets the high bits presumably
+     * come from softc segment base; test6's profile uses 32-bit truncated
+     * addresses too (upper bits are 0 for 0x04e5xxxx range). */
+    uint32_t buf[3] = { 0x0c, (uint32_t)(addr & 0xffffffff), value };
+    if (ioctl(ctx->fd, 0x800c410b /*A_11*/, buf) < 0) {
+        klog_printf("[APPLY_ERR] A_11 addr=0x%08x value=0x%08x errno=%d\n",
+                    (uint32_t)addr, value, errno);
+        ctx->writes_fail++;
+        return -1;
+    }
+    ctx->writes_ok++;
+    return 0;
+}
+
+/* Walker: builds 0x148-byte stub from profile, then emits every non-zero
+ * u32 slot as (sram_base + off, value) write. Returns 0 on success. */
+static int
+apply_profile(const unsigned char *profile, struct a53_apply_ctx *ctx)
+{
+    if (!profile) return -1;
+
+    uint32_t fw_id;         __builtin_memcpy(&fw_id, profile + 0x00, 4);
+    uint32_t extra_asm_flag;__builtin_memcpy(&extra_asm_flag, profile + 0x14, 4);
+    uint32_t full_patch_flag;__builtin_memcpy(&full_patch_flag, profile + 0x18, 4);
+    uint64_t sram_base;     __builtin_memcpy(&sram_base, profile + 0x58, 8);
+
+    klog_printf("[APPLY] profile fw=0x%08x extra_asm=%u full_patch=%u sram_base=0x%016llx\n",
+                fw_id, extra_asm_flag, full_patch_flag,
+                (unsigned long long)sram_base);
+
+    /* 0x148-byte stub buffer. */
+    uint8_t stub[0x148];
+    __builtin_memset(stub, 0, sizeof(stub));
+
+    /* Step 1: optional 5 hardcoded ARM64 instrs. */
+    if (extra_asm_flag != 0) {
+        klog_puts("[APPLY] step1: extra_asm_flag set, writing 5 fixed instrs\n");
+        for (int i = 0; i < 5; i++) {
+            __builtin_memcpy(stub + A53_EXTRA_ASM[i].off,
+                             &A53_EXTRA_ASM[i].instr, 4);
+        }
+    }
+
+    /* Step 2: 21 computed branches. */
+    for (int i = 0; i < 21; i++) {
+        const struct a53_patch_rec *r = &A53_INLINE_RECS[i];
+        uint64_t base, target;
+        __builtin_memcpy(&base,   profile + r->base_slot,   8);
+        __builtin_memcpy(&target, profile + r->target_slot, 8);
+        uint64_t site = base + r->site_pc_off;
+        uint32_t encoded;
+        int err = a53_enc_branch(target, site, r->opcode, &encoded);
+        if (err != 0) {
+            klog_printf("[APPLY_ERR] rec[%d] enc_branch err=%d base=0x%llx "
+                        "target=0x%llx site=0x%llx opcode=0x%08x\n",
+                        i, err,
+                        (unsigned long long)base,
+                        (unsigned long long)target,
+                        (unsigned long long)site, r->opcode);
+            return -2;
+        }
+        __builtin_memcpy(stub + r->dst_slot, &encoded, 4);
+    }
+
+    /* Step 3: 10 pre-encoded BL instrs copied verbatim from +0x120..+0x148. */
+    __builtin_memcpy(stub + 0x3c, profile + 0x120, 0x28);
+
+    /* Step 4: extra (addr, instr) pairs at +0x148..+0x188.
+     * Profile layout:
+     *   +0x148 u64 addr_a1
+     *   +0x150 u64 addr_a2
+     *   +0x158 2×u32 instrs (packed in a u64)
+     *   +0x160 u64 addr_a3
+     *   +0x168 u32 instr
+     *   +0x170 u64 addr_a4
+     *   +0x178 u32 instr (CBNZ-shaped)
+     *   +0x180 u64 addr_a5
+     *   +0x188 u32 instr
+     * These will be emitted as standalone (addr, instr) writes (not into
+     * stub buffer) because they target absolute addresses, not stub offsets.
+     */
+
+    klog_puts("[APPLY] step5: emitting stub as A_11 writes\n");
+    for (int off = 0; off < (int)sizeof(stub); off += 4) {
+        uint32_t w;
+        __builtin_memcpy(&w, stub + off, 4);
+        if (w == 0) continue;
+        if (a53_emit_write(ctx, sram_base + (uint64_t)off, w) != 0) {
+            klog_printf("[APPLY_ERR] stub write failed at off=0x%x\n", off);
+            return -3;
+        }
+    }
+
+    /* Step 6: emit standalone extra_addr pairs. */
+    const struct { uint16_t addr_off; uint16_t instr_off; } extras[] = {
+        /* +0x148 addr paired with +0x120 (first packed BL low u32)
+         * +0x150 addr paired with +0x124 (second packed BL low u32)
+         * This pairing is INFERRED; verify in dry-run. */
+        { 0x148, 0x120 }, { 0x150, 0x124 },
+        { 0x160, 0x158 }, { 0x168, 0x15c },  /* 2 instrs at +0x158 (packed) */
+        { 0x170, 0x168 }, { 0x180, 0x188 },
+    };
+    for (unsigned i = 0; i < sizeof(extras)/sizeof(extras[0]); i++) {
+        uint64_t a;
+        uint32_t v;
+        __builtin_memcpy(&a, profile + extras[i].addr_off, 8);
+        __builtin_memcpy(&v, profile + extras[i].instr_off, 4);
+        if (a == 0 || v == 0) continue;
+        if (a53_emit_write(ctx, a, v) != 0) {
+            klog_printf("[APPLY_ERR] extra write[%u] failed\n", i);
+            return -4;
+        }
+    }
+
+    klog_printf("[APPLY] done: %u writes ok, %u failed\n",
+                ctx->writes_ok, ctx->writes_fail);
+    return 0;
+}
+
 /* ---- Main install entry --------------------------------------------- */
 
 int
@@ -3262,7 +3493,31 @@ install_ppr_a53(uint32_t system_fw_version)
         return -2;
     }
 
-    klog_puts("[a53] skeleton stage complete; mailbox TX/RX not yet implemented\n");
+    /* ------------------------------------------------------------------ */
+    /* STAGE: apply PPR profile via A_11 writes.                          */
+    /* With A53_DRY_RUN=1 (default) this LOGS all writes but does nothing. */
+    /* ------------------------------------------------------------------ */
+    klog_printf("[a53] apply_profile (A53_DRY_RUN=%d)\n", A53_DRY_RUN);
+
+    struct a53_apply_ctx ctx;
+    __builtin_memset(&ctx, 0, sizeof(ctx));
+    ctx.dry_run = A53_DRY_RUN;
+    ctx.fd = -1;
+
+    if (!A53_DRY_RUN) {
+        ctx.fd = open("/dev/mp4/dump", O_RDWR);
+        if (ctx.fd < 0) {
+            klog_printf("[a53] open(/dev/mp4/dump) failed errno=%d; abort apply\n",
+                        errno);
+            return -3;
+        }
+    }
+
+    int ar = apply_profile(profile, &ctx);
+    klog_printf("[a53] apply_profile ret=%d writes ok=%u fail=%u\n",
+                ar, ctx.writes_ok, ctx.writes_fail);
+
+    if (ctx.fd >= 0) close(ctx.fd);
     return 0;
 }
 
