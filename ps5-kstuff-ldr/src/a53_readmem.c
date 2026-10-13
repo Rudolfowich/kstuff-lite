@@ -2022,9 +2022,12 @@ install_ppr_a53(uint32_t system_fw_version)
             uint64_t pages_skipped = 0;
             uint64_t iter = 0;
             const uint64_t total_iters = scan_size / sizeof(chunk);
-            /* Прогресс каждые 128 итераций = 512 KB. Yield после каждого чанка,
-             * иначе SceShellCore фризится и watchdog ребутает консоль. */
             const uint64_t PROGRESS_EVERY = 128;
+            /* Если первые N подряд страниц все вернули EFAULT — значит Byepervisor
+             * не активен (XOM всё ещё блокирует .text), и нет смысла крутить все
+             * 8192 итераций: ранний выход без ребута консоли. */
+            const uint64_t XOM_PROBE_PAGES = 32;
+            int byepervisor_active = -1; /* -1 unknown, 0 no, 1 yes */
 
             for (uint64_t cur = scan_start; cur < scan_start + scan_size; cur += sizeof(chunk)) {
                 memset(chunk, 0, sizeof(chunk));
@@ -2032,12 +2035,25 @@ install_ppr_a53(uint32_t system_fw_version)
                 if (ret != 0) {
                     memset(chunk, 0, sizeof(chunk));
                     pages_skipped++;
+                } else if (byepervisor_active == -1) {
+                    byepervisor_active = 1;
+                    klog_printf("[KDUMP] *** SAFE_PEEK returned real page at iter=%llu → Byepervisor active\n",
+                                (unsigned long long)iter);
                 }
+
+                /* Проверка после первых XOM_PROBE_PAGES итераций */
+                if (iter == XOM_PROBE_PAGES - 1 && byepervisor_active == -1) {
+                    byepervisor_active = 0;
+                    klog_printf("[KDUMP] *** All first %llu SAFE_PEEK calls returned EFAULT — Byepervisor NOT active, aborting KDUMP\n",
+                                (unsigned long long)XOM_PROBE_PAGES);
+                    break;
+                }
+
                 ssize_t w = write(kdfd, chunk, sizeof(chunk));
                 if (w > 0) bytes_written += w;
 
-                /* Отдаём шедулеру — критично чтобы SceShellCore не фризился */
-                usleep(100);
+                /* Yield только когда реально читаем — EFAULT-случай не нагружает ядро */
+                if (ret == 0) usleep(100);
 
                 iter++;
                 if ((iter % PROGRESS_EVERY) == 0 || iter == total_iters) {
