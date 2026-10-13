@@ -634,6 +634,39 @@ probe_opened_mp4_fd(int fd, const char *name)
         }
 
         /* --------------------------------------------------------------------- */
+        /* ШАГ 1: ВСЕ ОПЕРАЦИИ КРОМЕ WRITE (ioctl, mmap, read) НА fd_mp4 И SIBLING */
+        /* --------------------------------------------------------------------- */
+        klog_printf("[STEP_1_OPS] === Testing non-write ops on fd_mp4=%d ===\n", fd);
+
+        /* 1a. IOCTL */
+        uint8_t iobuf[256] = {0};
+        uint32_t ioctl_cmds[] = { 0, 0x40044D01, 0xC0084D02, 0x40044D10 };
+        for (int ic = 0; ic < 4; ic++) {
+            errno = 0;
+            int ir = ioctl(fd, ioctl_cmds[ic], iobuf);
+            int ie = errno;
+            klog_printf("[STEP_1_IOCTL] cmd=0x%08x -> ret=%d (errno=%d)\n", ioctl_cmds[ic], ir, ie);
+        }
+
+        /* 1b. MMAP */
+        errno = 0;
+        void *map_ptr = mmap(NULL, 0x1000, PROT_READ, MAP_SHARED, fd, 0);
+        int me = errno;
+        klog_printf("[STEP_1_MMAP] mmap ret=%p (errno=%d)\n", map_ptr, me);
+        if (map_ptr != MAP_FAILED) {
+            klog_printf("[BREAKTHROUGH!] MMAP SUCCESS on fd=%d! first_u32=0x%08x\n",
+                        fd, *(uint32_t*)map_ptr);
+            munmap(map_ptr, 0x1000);
+        }
+
+        /* 1c. READ */
+        uint8_t r_buf[256] = {0};
+        errno = 0;
+        ssize_t r_bytes = read(fd, r_buf, sizeof(r_buf));
+        int re = errno;
+        klog_printf("[STEP_1_READ] read ret=%zd (errno=%d)\n", r_bytes, re);
+
+        /* --------------------------------------------------------------------- */
         /* ШАГ B: Открыть эталонные cdev (/dev/dmem1, /dev/dce, /dev/notification0) */
         /* --------------------------------------------------------------------- */
         const char *cand_cdevs[] = {
@@ -654,6 +687,7 @@ probe_opened_mp4_fd(int fd, const char *name)
             klog_printf("[REF_TRY] '%s' -> fd=%d (errno=%d)\n", cand_cdevs[c], c_fd, err);
 
             if (c_fd >= 0) {
+                /* Чистим старый слот и берем правильный дескриптор */
                 uint64_t c_info[40] = {0};
                 kekcall(KEKCALL_GET_FD_INFO, (uint64_t)c_fd, 1ULL, (uintptr_t)c_info);
                 uint64_t c_fp = c_info[5 + 2 + c_fd];
@@ -666,6 +700,49 @@ probe_opened_mp4_fd(int fd, const char *name)
                     break;
                 }
                 close(c_fd);
+            }
+        }
+
+        /* --------------------------------------------------------------------- */
+        /* ШАГ 2: Скопировать fp+0x40 блоб из dmem1 в fp+0x40 нашего mp4        */
+        /* --------------------------------------------------------------------- */
+        if (fp_cand_priv && ptr_40 && (ptr_40 >> 48) == 0xffff) {
+            uint64_t cand_ptr40 = 0;
+            kekcall(KEKCALL_DUMP_MEM, fp_cand_priv + 0x40ULL, (uintptr_t)&cand_ptr40, 8);
+            klog_printf("[STEP_2] candidate %s fp+0x40 = 0x%llx, our ptr_40 = 0x%llx\n",
+                        found_cand_name, (unsigned long long)cand_ptr40, (unsigned long long)ptr_40);
+
+            if (cand_ptr40 && (cand_ptr40 >> 48) == 0xffff) {
+                /* Бэкапим наш блоб ptr_40 (0x80 байт) */
+                uint64_t bkp_ptr40[16] = {0};
+                for (int i = 0; i < 16; i++) {
+                    kekcall(KEKCALL_DUMP_MEM, ptr_40 + (uint64_t)i * 8, (uintptr_t)&bkp_ptr40[i], 8);
+                }
+
+                /* Клонируем блоб из cand_ptr40 в ptr_40 */
+                for (int i = 0; i < 16; i++) {
+                    uint64_t cv = 0;
+                    kekcall(KEKCALL_DUMP_MEM, cand_ptr40 + (uint64_t)i * 8, (uintptr_t)&cv, 8);
+                    kekcall(27 /* WRITE64 */, ptr_40 + (uint64_t)i * 8, cv, 0);
+                }
+
+                /* Пробуем write */
+                uint8_t w_cmd[8] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+                errno = 0;
+                ssize_t nw2 = write(fd, w_cmd, 8);
+                int we2 = errno;
+                klog_printf("[STEP_2_WRITE] write after cloning %s fp+0x40: nw=%zd (errno=%d)\n",
+                            found_cand_name, nw2, we2);
+
+                if (nw2 >= 0 || we2 != 19) {
+                    klog_printf("[BREAKTHROUGH!] ENODEV 19 BYPASSED VIA FP+0x40 CLONING! nw=%zd errno=%d\n",
+                                nw2, we2);
+                }
+
+                /* Восстанавливаем оригинальный блог */
+                for (int i = 0; i < 16; i++) {
+                    kekcall(27, ptr_40 + (uint64_t)i * 8, bkp_ptr40[i], 0);
+                }
             }
         }
 
