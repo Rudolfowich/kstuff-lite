@@ -1530,6 +1530,29 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                 if (jfd >= 0) {
                     klog_printf("[DOPEN_JMP_OPEN] *** SUCCESS *** opened mp4/dump_for_decid with legitimate init!\n");
 
+                    /* Raise RLIMIT_NOFILE in case too many fds leaked from prior probes */
+                    {
+                        #include <sys/resource.h>
+                        struct rlimit rl;
+                        if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
+                            klog_printf("[RLIMIT] NOFILE cur=%llu max=%llu\n",
+                                        (unsigned long long)rl.rlim_cur,
+                                        (unsigned long long)rl.rlim_max);
+                            rl.rlim_cur = rl.rlim_max;
+                            if (setrlimit(RLIMIT_NOFILE, &rl) == 0) {
+                                klog_printf("[RLIMIT] raised cur to %llu\n",
+                                            (unsigned long long)rl.rlim_cur);
+                            }
+                        }
+                        /* Also close any leftover low-numbered fds (except jfd and stdio) */
+                        for (int fd_i = 3; fd_i < 32; fd_i++) {
+                            if (fd_i == jfd) continue;
+                            if (close(fd_i) == 0) {
+                                klog_printf("[RLIMIT] closed stale fd=%d\n", fd_i);
+                            }
+                        }
+                    }
+
                     /* ---- MP4_DUMP: check if /dev/mp4/dump exists as separate cdev.
                      * stat() returns ENOENT if doesn't exist. On 13.60 Sony likely
                      * renamed mp4/dump → mp4/dump_for_decid (our existing jfd target). */
