@@ -1611,6 +1611,80 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                                     a[16],a[17],a[18],a[19]);
                     }
 
+                    /* -----------------------------------------------------------
+                     * WRITE_TEST: записываем узнаваемый pattern в softc+0x880
+                     * (identifier output buffer) и повторяем ioctl B_28, чтобы
+                     * увидеть — читает ли handler именно из этого места и/или
+                     * перезаписывает ли он наш pattern.
+                     * ----------------------------------------------------------- */
+                    {
+                        uint64_t wt_kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+                        if (wt_kbase > 0xffffffff00000000ULL) {
+                            uint64_t wt_g1_va = wt_kbase + 0x312eb58ULL;
+                            uint64_t wt_g1 = 0;
+                            kekcall(KEKCALL_DUMP_MEM, wt_g1_va, (uintptr_t)&wt_g1, 8);
+                            if ((wt_g1 >> 48) == 0xffff && wt_g1 >= 0xffff800000000000ULL) {
+                                uint64_t buf_va = wt_g1 + 0x880ULL;
+                                /* Паттерн: 16 qwords по 0xDEADBEEFCAFEBABE +  index */
+                                for (int k = 0; k < 16; k++) {
+                                    uint64_t val = 0xDEADBEEFCAFEBA00ULL | (uint64_t)k;
+                                    kekcall(27 /* WRITE64 */, buf_va + (uint64_t)k * 8ULL, val, 0);
+                                }
+                                /* Readback — убедиться, что записалось */
+                                static uint8_t wt_rb[128];
+                                memset(wt_rb, 0, sizeof(wt_rb));
+                                kekcall(KEKCALL_DUMP_MEM, buf_va, (uintptr_t)wt_rb, sizeof(wt_rb));
+                                klog_printf("[WRITE_TEST] planted at g1+0x880 (0x%llx); readback:\n",
+                                            (unsigned long long)buf_va);
+                                for (int row = 0; row < 128; row += 16) {
+                                    klog_printf("[WT_RB+%03x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                                row,
+                                                wt_rb[row+0],wt_rb[row+1],wt_rb[row+2],wt_rb[row+3],
+                                                wt_rb[row+4],wt_rb[row+5],wt_rb[row+6],wt_rb[row+7],
+                                                wt_rb[row+8],wt_rb[row+9],wt_rb[row+10],wt_rb[row+11],
+                                                wt_rb[row+12],wt_rb[row+13],wt_rb[row+14],wt_rb[row+15]);
+                                }
+                                /* Теперь ioctl B_28 — что он отдаст в user buf? */
+                                uint8_t a28[20] = {0};
+                                errno = 0;
+                                int ir28 = ioctl(jfd, 0x4014421c, a28);
+                                int ie28 = errno;
+                                klog_printf("[B_28_POST_WRITE] ret=%d errno=%d out20=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                            ir28, ie28,
+                                            a28[0],a28[1],a28[2],a28[3], a28[4],a28[5],a28[6],a28[7],
+                                            a28[8],a28[9],a28[10],a28[11], a28[12],a28[13],a28[14],a28[15],
+                                            a28[16],a28[17],a28[18],a28[19]);
+                                /* Снова читаем buf — handler перезаписал или нет? */
+                                memset(wt_rb, 0, sizeof(wt_rb));
+                                kekcall(KEKCALL_DUMP_MEM, buf_va, (uintptr_t)wt_rb, sizeof(wt_rb));
+                                klog_printf("[WT_POST_IOCTL] buf after ioctl:\n");
+                                for (int row = 0; row < 128; row += 16) {
+                                    klog_printf("[WT_PI+%03x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                                row,
+                                                wt_rb[row+0],wt_rb[row+1],wt_rb[row+2],wt_rb[row+3],
+                                                wt_rb[row+4],wt_rb[row+5],wt_rb[row+6],wt_rb[row+7],
+                                                wt_rb[row+8],wt_rb[row+9],wt_rb[row+10],wt_rb[row+11],
+                                                wt_rb[row+12],wt_rb[row+13],wt_rb[row+14],wt_rb[row+15]);
+                                }
+                                /* read() тоже — вдруг теперь не 0 */
+                                static uint8_t rtest[64];
+                                memset(rtest, 0, sizeof(rtest));
+                                errno = 0;
+                                ssize_t nrt = read(jfd, rtest, sizeof(rtest));
+                                int ret_err = errno;
+                                klog_printf("[WT_READ] nr=%zd errno=%d first16=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                            nrt, ret_err,
+                                            rtest[0],rtest[1],rtest[2],rtest[3],
+                                            rtest[4],rtest[5],rtest[6],rtest[7],
+                                            rtest[8],rtest[9],rtest[10],rtest[11],
+                                            rtest[12],rtest[13],rtest[14],rtest[15]);
+                            } else {
+                                klog_printf("[WRITE_TEST] g1 not kernel ptr (0x%016llx) — skip\n",
+                                            (unsigned long long)wt_g1);
+                            }
+                        }
+                    }
+
                     /* 3) После ioctl-попыток — ещё один read 4096 на случай если ioctl разогрел буфер */
                     memset(rbuf, 0, sizeof(rbuf));
                     errno = 0;
@@ -1696,6 +1770,30 @@ dopen_jmp_done: ;
                 }
             } else {
                 klog_printf("[DECI_WAIT] GLOBAL1 is NULL/non-kernel — handler would hang waiting for deci\n");
+            }
+
+            /* HELPER dump: функция, в которую основная делает call rel -0x1c5f1
+             * из offset+0x8c — вероятно именно она ждёт deci и пишет identifier.
+             * Target VA ≈ kbase - 0xb9ba0. Дампим 2 KB. */
+            {
+                uint64_t helper_va = probe_kbase - 0xb9ba0ULL;
+                static uint8_t hbody[2048];
+                memset(hbody, 0, sizeof(hbody));
+                long hr = kekcall(KEKCALL_DUMP_MEM, helper_va, (uintptr_t)hbody, sizeof(hbody));
+                klog_printf("[DECI_WAIT] helper dump ret=%ld (2 KB from 0x%llx)\n",
+                            hr, (unsigned long long)helper_va);
+                for (int row = 0; row < 2048; row += 32) {
+                    klog_printf("[HBODY+%04x] %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                row,
+                                hbody[row+0],hbody[row+1],hbody[row+2],hbody[row+3],
+                                hbody[row+4],hbody[row+5],hbody[row+6],hbody[row+7],
+                                hbody[row+8],hbody[row+9],hbody[row+10],hbody[row+11],
+                                hbody[row+12],hbody[row+13],hbody[row+14],hbody[row+15],
+                                hbody[row+16],hbody[row+17],hbody[row+18],hbody[row+19],
+                                hbody[row+20],hbody[row+21],hbody[row+22],hbody[row+23],
+                                hbody[row+24],hbody[row+25],hbody[row+26],hbody[row+27],
+                                hbody[row+28],hbody[row+29],hbody[row+30],hbody[row+31]);
+                }
             }
 
             /* Теперь полное тело функции — 2 KB хватит на весь poll-loop */
