@@ -1031,11 +1031,21 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         /* RPC pre-patch is active. Probe all 6 ioctl cmds. */
         /* mp4/dump uses 'A' group ioctls (0x41), not 'B'. Reverse-engineered from
          * d_ioctl switch: A_11(12), A_14(8), A_20(24), A_31(8), A_32(8), A_40(12) */
+        /* A_11 handler expects buf[0]=12 (size tag). Stores buf[4..11] to
+         * session_record, triggers A53 mailbox if softc+0x4ec==0 */
         {
-            uint8_t a[12] = {0};
+            uint8_t a[12] = {12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};  /* buf[0]=12 */
             errno = 0;
             int r = ioctl(fd0, 0x800c410b, a);  /* A_11 IOR 12 */
-            klog_printf("[S1_A11] ret=%d errno=%d out12=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+            klog_printf("[S1_A11_v12] ret=%d errno=%d out12=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                        r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11]);
+        }
+        {
+            /* Try with non-zero params (session_id in buf[4], arg in buf[8]) */
+            uint8_t a[12] = {12, 0, 0, 0, 1, 0, 0, 0, 0x55, 0xaa, 0, 0};
+            errno = 0;
+            int r = ioctl(fd0, 0x800c410b, a);  /* A_11 */
+            klog_printf("[S1_A11_v2] ret=%d errno=%d out12=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
                         r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11]);
         }
         {
