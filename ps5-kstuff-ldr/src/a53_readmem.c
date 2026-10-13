@@ -1471,8 +1471,31 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
             uint64_t patch_addr = real_dopen2 + 0x18ULL;
             uint64_t orig_qword = 0;
             kekcall(KEKCALL_DUMP_MEM, patch_addr, (uintptr_t)&orig_qword, 8);
-            klog_printf("[DOPEN_JMP] saved orig 8 bytes at 0x%llx: 0x%016llx\n",
+            klog_printf("[DOPEN_JMP] read qword at 0x%llx: 0x%016llx\n",
                         (unsigned long long)patch_addr, (unsigned long long)orig_qword);
+
+            /* Canonical original для firmware 13.60: rel32 call target1 position-
+             * independent. bytes = e8 c3 67 9d ff bb 01 00 → qword 0x0001bbff9d67c3e8.
+             * Если прочитанный qword совпадает с нашим патчем (0x0001bb00000051e9)
+             * значит prior ран оставил патч в ядре → recovery. */
+            const uint64_t CANONICAL_ORIG_1360 = 0x0001bbff9d67c3e8ULL;
+            const uint64_t KNOWN_PATCH         = 0x0001bb00000051e9ULL;
+            if (orig_qword == KNOWN_PATCH) {
+                klog_printf("[DOPEN_JMP] *** CORRUPTED STATE DETECTED (prior run left patch), recovering to canonical orig\n");
+                long rrec = kekcall(27, patch_addr, CANONICAL_ORIG_1360, 0);
+                uint64_t rrcheck = 0;
+                kekcall(KEKCALL_DUMP_MEM, patch_addr, (uintptr_t)&rrcheck, 8);
+                klog_printf("[DOPEN_JMP] recovery write ret=%ld readback=0x%016llx %s\n",
+                            rrec, (unsigned long long)rrcheck,
+                            (rrcheck == CANONICAL_ORIG_1360) ? "RECOVERED" : "RECOVERY-FAIL");
+                orig_qword = CANONICAL_ORIG_1360;
+            } else if (orig_qword != CANONICAL_ORIG_1360) {
+                klog_printf("[DOPEN_JMP] *** UNEXPECTED orig=0x%016llx (expected canonical 0x%016llx) — aborting patch\n",
+                            (unsigned long long)orig_qword,
+                            (unsigned long long)CANONICAL_ORIG_1360);
+                /* skip whole DOPEN_JMP блок — не трогаем неизвестное состояние */
+                goto dopen_jmp_done;
+            }
 
             /* Новый qword: байты [0..4] = e9 51 00 00 00 (jmp +0x51), байты [5..7] = original */
             uint8_t bytes[8];
@@ -1602,15 +1625,15 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                 }
             }
 
-            /* Восстанавливаем оригинальные 8 байт */
-            long rr = kekcall(27 /* KEKCALL_WRITE64 */, patch_addr, orig_qword, 0);
+            /* Восстанавливаем оригинальные 8 байт — всегда к canonical, не к orig_qword */
+            long rr = kekcall(27 /* KEKCALL_WRITE64 */, patch_addr, 0x0001bbff9d67c3e8ULL, 0);
             uint64_t final_rb = 0;
             kekcall(KEKCALL_DUMP_MEM, patch_addr, (uintptr_t)&final_rb, 8);
-            klog_printf("[DOPEN_JMP] RESTORED orig=0x%016llx wr_ret=%ld readback=0x%016llx %s\n",
-                        (unsigned long long)orig_qword, rr,
-                        (unsigned long long)final_rb,
-                        (final_rb == orig_qword) ? "OK" : "MISMATCH-DANGER");
+            klog_printf("[DOPEN_JMP] RESTORED to canonical=0x0001bbff9d67c3e8 wr_ret=%ld readback=0x%016llx %s\n",
+                        rr, (unsigned long long)final_rb,
+                        (final_rb == 0x0001bbff9d67c3e8ULL) ? "OK" : "MISMATCH-DANGER");
         }
+dopen_jmp_done: ;
     }
 
     /* ------------------------------------------------------------------------- */
