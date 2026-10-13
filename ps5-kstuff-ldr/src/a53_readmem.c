@@ -3373,6 +3373,18 @@ apply_profile(const unsigned char *profile, struct a53_apply_ctx *ctx)
         }
     }
 
+    /* Step 7: A_15 commit doorbell. test6 uses 4× A_15 {8} nudges in the
+     * install flow — the A_11 writes may just stage the mailbox; A_15 is
+     * what makes A53 actually process the queue. Fire one at the end. */
+    if (!ctx->dry_run && ctx->fd >= 0) {
+        uint32_t nudge[2] = { 8, 0 };
+        errno = 0;
+        int r = ioctl(ctx->fd, 0x8008410f /*A_15*/, nudge);
+        klog_printf("[APPLY] A_15 doorbell: ret=%d errno=%d\n", r, errno);
+    } else {
+        klog_puts("[APPLY_DRY] A_15 doorbell {8,0}\n");
+    }
+
     klog_printf("[APPLY] done: %u writes ok, %u failed\n",
                 ctx->writes_ok, ctx->writes_fail);
     return 0;
