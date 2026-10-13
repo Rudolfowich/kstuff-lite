@@ -1031,22 +1031,41 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         /* RPC pre-patch is active. Probe all 6 ioctl cmds. */
         /* mp4/dump uses 'A' group ioctls (0x41), not 'B'. Reverse-engineered from
          * d_ioctl switch: A_11(12), A_14(8), A_20(24), A_31(8), A_32(8), A_40(12) */
-        /* A_11 handler expects buf[0]=12 (size tag). Stores buf[4..11] to
-         * session_record, triggers A53 mailbox if softc+0x4ec==0 */
+        /* A_11 triggers A53 mailbox IF softc+0x4ec == 0. Reset it via kekcall. */
         {
-            uint8_t a[12] = {12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};  /* buf[0]=12 */
-            errno = 0;
-            int r = ioctl(fd0, 0x800c410b, a);  /* A_11 IOR 12 */
-            klog_printf("[S1_A11_v12] ret=%d errno=%d out12=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
-                        r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11]);
-        }
-        {
-            /* Try with non-zero params (session_id in buf[4], arg in buf[8]) */
-            uint8_t a[12] = {12, 0, 0, 0, 1, 0, 0, 0, 0x55, 0xaa, 0, 0};
-            errno = 0;
-            int r = ioctl(fd0, 0x800c410b, a);  /* A_11 */
-            klog_printf("[S1_A11_v2] ret=%d errno=%d out12=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
-                        r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11]);
+            uint64_t softc = 0;
+            kekcall(KEKCALL_DUMP_MEM, g_cdev_mp4_dump + 0xa8ULL, (uintptr_t)&softc, 8);
+            if ((softc >> 48) == 0xffff) {
+                klog_printf("[S1_SOFTC] mp4/dump softc @ 0x%llx\n", (unsigned long long)softc);
+                kekcall(27, softc + 0x4ec, 0, 0);  /* reset mailbox-skip flag */
+                klog_printf("[S1_SOFTC] cleared softc+0x4ec\n");
+
+                /* snapshot pre */
+                uint64_t pre6d0[6] = {0};
+                kekcall(KEKCALL_DUMP_MEM, softc + 0x6d0, (uintptr_t)pre6d0, 48);
+                klog_printf("[S1_PRE_6d0] %016llx %016llx %016llx %016llx %016llx %016llx\n",
+                            (unsigned long long)pre6d0[0], (unsigned long long)pre6d0[1],
+                            (unsigned long long)pre6d0[2], (unsigned long long)pre6d0[3],
+                            (unsigned long long)pre6d0[4], (unsigned long long)pre6d0[5]);
+                /* A_11 call with buf[0]=12 */
+                uint8_t a[12] = {12, 0, 0, 0, 1, 0, 0, 0, 0x55, 0xaa, 0, 0};
+                errno = 0;
+                int r = ioctl(fd0, 0x800c410b, a);
+                klog_printf("[S1_A11_fire] ret=%d errno=%d out12=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                            r, errno, a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9],a[10],a[11]);
+                /* snapshot post */
+                uint64_t post6d0[6] = {0};
+                kekcall(KEKCALL_DUMP_MEM, softc + 0x6d0, (uintptr_t)post6d0, 48);
+                klog_printf("[S1_POST_6d0] %016llx %016llx %016llx %016llx %016llx %016llx\n",
+                            (unsigned long long)post6d0[0], (unsigned long long)post6d0[1],
+                            (unsigned long long)post6d0[2], (unsigned long long)post6d0[3],
+                            (unsigned long long)post6d0[4], (unsigned long long)post6d0[5]);
+                /* And check +0x4ec/+0x4e2 after (mailbox-fired markers) */
+                uint32_t v4ec = 0, v4e2 = 0;
+                kekcall(KEKCALL_DUMP_MEM, softc + 0x4ec, (uintptr_t)&v4ec, 4);
+                kekcall(KEKCALL_DUMP_MEM, softc + 0x4e2, (uintptr_t)&v4e2, 4);
+                klog_printf("[S1_POST_FLAGS] +0x4ec=0x%x +0x4e2=0x%x\n", v4ec, v4e2);
+            }
         }
         {
             uint8_t a[8] = {0};
