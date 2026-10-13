@@ -1127,16 +1127,24 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                 uint8_t fdbuf[0x400] = {0};
                 kekcall(KEKCALL_DUMP_MEM, fd_ofiles, (uintptr_t)fdbuf, 0x400);
 
-                /* Таблица fdescent во FreeBSD: элементы начинаются с +0x00 */
-                uint32_t stride = 0x18;
-                uint32_t slot_mp4 = fd_mp4 * stride;
-                uint32_t slot_null = (fd_null >= 0) ? (fd_null * stride) : 0;
+                /* Печатаем первые 16 слотов по 8 байт для ясности */
+                klog_printf("[FDT_RAW_SLOTS]:\n");
+                for (int s = 0; s < 24; s++) {
+                    uint64_t val = *(uint64_t*)(fdbuf + s * 8);
+                    klog_printf("  slot[%02d] (+0x%02x) = 0x%016llx\n", s, s * 8, (unsigned long long)val);
+                }
 
-                if (slot_mp4 + 8 <= 0x400) fp_mp4 = *(uint64_t*)(fdbuf + slot_mp4);
-                if (slot_null && slot_null + 8 <= 0x400) fp_null = *(uint64_t*)(fdbuf + slot_null);
+                /* Во FreeBSD struct fdescent: fde_file (+0x00) или (+0x08) */
+                for (int s = 0; s < 16; s++) {
+                    uint64_t cand = *(uint64_t*)(fdbuf + s * 8);
+                    if ((cand >> 48) == 0xffff) {
+                        if (!fp_mp4) fp_mp4 = cand;
+                        else if (!fp_null && cand != fp_mp4) fp_null = cand;
+                    }
+                }
 
-                klog_printf("[FDT] resolved: fp_mp4=0x%llx fp_null=0x%llx (stride=0x%x)\n",
-                            (unsigned long long)fp_mp4, (unsigned long long)fp_null, stride);
+                klog_printf("[FDT] candidates: fp_mp4=0x%llx fp_null=0x%llx\n",
+                            (unsigned long long)fp_mp4, (unsigned long long)fp_null);
             }
         }
 
