@@ -1057,21 +1057,22 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                 (unsigned long long)g_cdev_deci_coredump,
                 (unsigned long long)mp4_cdev_addr);
 
-    struct { const char *name; uint64_t addr; } neighbours[] = {
-        { "deci_mp4_ioc",  g_cdev_deci_mp4_ioc },
-        { "deci_mp4_mmc",  g_cdev_deci_mp4_mmc },
-        { "deci_coredump", g_cdev_deci_coredump },
-        { "mp4_dump_dec",  mp4_cdev_addr }
+    uint64_t cdev_list[4] = {
+        g_cdev_deci_mp4_ioc,
+        g_cdev_deci_mp4_mmc,
+        g_cdev_deci_coredump,
+        mp4_cdev_addr
     };
 
     uint64_t discovered_softc = 0;
     uint32_t discovered_softc_off = 0;
 
     for (int n = 0; n < 4; n++) {
-        if (!neighbours[n].addr) continue;
+        uint64_t cdev = cdev_list[n];
+        if (!cdev) continue;
         uint64_t nwords[8] = {0};
-        kekcall(KEKCALL_DUMP_MEM, neighbours[n].addr + 0x60ULL, (uintptr_t)nwords, 64);
-        klog_printf("[CDEV_%s +0x60..0x98]:\n", neighbours[n].name);
+        kekcall(KEKCALL_DUMP_MEM, cdev + 0x60ULL, (uintptr_t)nwords, 64);
+        klog_printf("[CDEV_DUMP #%d @ 0x%llx +0x60..0x98]:\n", n, (unsigned long long)cdev);
         for (int i = 0; i < 8; i++) {
             uint32_t off = 0x60 + i * 8;
             uint64_t val = nwords[i];
@@ -1086,6 +1087,7 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
             }
         }
     }
+
 
     /* ------------------------------------------------------------------------- */
     /* ШАГ B — Результат определения EXACT offset si_drv1                        */
