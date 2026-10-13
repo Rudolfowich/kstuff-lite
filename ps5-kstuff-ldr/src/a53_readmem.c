@@ -3427,13 +3427,8 @@ install_ppr_a53(uint32_t system_fw_version)
      * Run EARLY — before the massive diagnostic probe below — because
      * the probe can take minutes and may trigger a watchdog TMR violation.
      * ================================================================== */
-    /* ================================================================
-     * A53 READ-ONLY PROBE — non-destructive diagnostic to learn what
-     * mp4/dump returns on 13.60 via read()/A_23/A_14.
-     *
-     * Needs DAC patches first. Does zero writes to A53 memory.
-     * Expected to be safe: PS5 should remain fully functional after.
-     * ================================================================ */
+    /* A53_PROBE DISABLED — causes PS5 reboots. Only CDEV_SCAN needed. */
+#if 0
     {
         klog_puts("[A53_PROBE] starting non-destructive A53 read probe\n");
         /* Inline DAC patches (same as apply_profile does) */
@@ -3602,6 +3597,7 @@ install_ppr_a53(uint32_t system_fw_version)
             klog_puts("[A53_PROBE] fd closed, probe done\n");
         }
     }
+#endif  /* A53_PROBE disabled */
 
     klog_printf("[a53] apply_profile (A53_DRY_RUN=%d)\n", A53_DRY_RUN);
     {
