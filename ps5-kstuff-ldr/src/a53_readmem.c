@@ -1685,15 +1685,82 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                         }
                     }
 
-                    /* 3) После ioctl-попыток — ещё один read 4096 на случай если ioctl разогрел буфер */
+                    /* -----------------------------------------------------------
+                     * READ_HIJACK: из offline reverse d_read'а знаем, что он
+                     * читает softc[0x870]..softc[0x868] откуда [0x858]+cursor.
+                     * Снимаем текущие значения, затем ставим base=&softc[+0x880]
+                     * (там наш pattern), size=128, cursor=0 → read() должен
+                     * вернуть наши 128 байт.
+                     * ----------------------------------------------------------- */
+                    {
+                        uint64_t hk_kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+                        if (hk_kbase > 0xffffffff00000000ULL) {
+                            uint64_t hk_g1_va = hk_kbase + 0x312eb58ULL;
+                            uint64_t hk_g1 = 0;
+                            kekcall(KEKCALL_DUMP_MEM, hk_g1_va, (uintptr_t)&hk_g1, 8);
+                            if ((hk_g1 >> 48) == 0xffff && hk_g1 >= 0xffff800000000000ULL) {
+                                /* dump softc[0x500..0x900] = 1024 bytes */
+                                static uint8_t sbuf[1024];
+                                memset(sbuf, 0, sizeof(sbuf));
+                                kekcall(KEKCALL_DUMP_MEM, hk_g1 + 0x500ULL, (uintptr_t)sbuf, sizeof(sbuf));
+                                klog_printf("[HIJACK] softc @ 0x%llx fields:\n", (unsigned long long)hk_g1);
+                                for (int row = 0; row < 1024; row += 16) {
+                                    klog_printf("[SOFTC+%03x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                                0x500+row,
+                                                sbuf[row+0],sbuf[row+1],sbuf[row+2],sbuf[row+3],
+                                                sbuf[row+4],sbuf[row+5],sbuf[row+6],sbuf[row+7],
+                                                sbuf[row+8],sbuf[row+9],sbuf[row+10],sbuf[row+11],
+                                                sbuf[row+12],sbuf[row+13],sbuf[row+14],sbuf[row+15]);
+                                }
+                                /* Backup +0x858/+0x868/+0x870 */
+                                uint64_t bak_858 = 0, bak_868 = 0, bak_870 = 0;
+                                kekcall(KEKCALL_DUMP_MEM, hk_g1 + 0x858ULL, (uintptr_t)&bak_858, 8);
+                                kekcall(KEKCALL_DUMP_MEM, hk_g1 + 0x868ULL, (uintptr_t)&bak_868, 8);
+                                kekcall(KEKCALL_DUMP_MEM, hk_g1 + 0x870ULL, (uintptr_t)&bak_870, 8);
+                                klog_printf("[HIJACK] backup +0x858=0x%llx +0x868=0x%llx +0x870=0x%llx\n",
+                                            (unsigned long long)bak_858,
+                                            (unsigned long long)bak_868,
+                                            (unsigned long long)bak_870);
+                                /* Point base at softc+0x880 (which still has our DEADBEEF pattern),
+                                 * set size=128, cursor=0 */
+                                uint64_t buf_va = hk_g1 + 0x880ULL;
+                                kekcall(27, hk_g1 + 0x858ULL, buf_va, 0);
+                                kekcall(27, hk_g1 + 0x868ULL, 128ULL, 0);
+                                kekcall(27, hk_g1 + 0x870ULL, 0ULL, 0);
+                                klog_printf("[HIJACK] poked +0x858=0x%llx size=128 cursor=0\n",
+                                            (unsigned long long)buf_va);
+                                /* Call read — should return 128 bytes of DEADBEEF pattern */
+                                static uint8_t hread[256];
+                                memset(hread, 0, sizeof(hread));
+                                errno = 0;
+                                ssize_t hnr = read(jfd, hread, sizeof(hread));
+                                int he = errno;
+                                klog_printf("[HIJACK_READ] nr=%zd errno=%d\n", hnr, he);
+                                if (hnr > 0) {
+                                    for (int row = 0; row < (int)hnr && row < 128; row += 16) {
+                                        klog_printf("[HR+%03x] %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                                    row,
+                                                    hread[row+0], hread[row+1],
+                                                    hread[row+2], hread[row+3],
+                                                    hread[row+4], hread[row+5],
+                                                    hread[row+6], hread[row+7]);
+                                    }
+                                }
+                                /* Restore softc fields */
+                                kekcall(27, hk_g1 + 0x858ULL, bak_858, 0);
+                                kekcall(27, hk_g1 + 0x868ULL, bak_868, 0);
+                                kekcall(27, hk_g1 + 0x870ULL, bak_870, 0);
+                                klog_printf("[HIJACK] restored softc fields\n");
+                            }
+                        }
+                    }
+
+                    /* Final read as before */
                     memset(rbuf, 0, sizeof(rbuf));
                     errno = 0;
                     ssize_t nr_final = read(jfd, rbuf, 4096);
                     int re_final = errno;
-                    klog_printf("[READ_AFTER_IOCTL] nr=%zd errno=%d first16=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
-                                nr_final, re_final,
-                                rbuf[0],rbuf[1],rbuf[2],rbuf[3], rbuf[4],rbuf[5],rbuf[6],rbuf[7],
-                                rbuf[8],rbuf[9],rbuf[10],rbuf[11], rbuf[12],rbuf[13],rbuf[14],rbuf[15]);
+                    klog_printf("[READ_AFTER_IOCTL] nr=%zd errno=%d\n", nr_final, re_final);
 
                     close(jfd);
                 }
