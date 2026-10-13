@@ -1686,6 +1686,67 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                     }
 
                     /* -----------------------------------------------------------
+                     * SESSION_PTR: cdev+0xb0 = si_drv2 = pointer на session_record,
+                     * откуда B_28 читает {size,flags,handle,cid_hi,cid_lo}.
+                     * Если найдём и подложим свой buffer — B_28 вернёт наши байты
+                     * как identifier.
+                     * ----------------------------------------------------------- */
+                    if (dedicated_mp4_cdev) {
+                        uint64_t sess_ptr = 0;
+                        kekcall(KEKCALL_DUMP_MEM, dedicated_mp4_cdev + 0xb0ULL,
+                                (uintptr_t)&sess_ptr, 8);
+                        klog_printf("[SESS_PTR] cdev=0x%llx cdev+0xb0=0x%llx\n",
+                                    (unsigned long long)dedicated_mp4_cdev,
+                                    (unsigned long long)sess_ptr);
+                        if ((sess_ptr >> 48) == 0xffff && sess_ptr >= 0xffff800000000000ULL) {
+                            static uint8_t srec[64];
+                            memset(srec, 0, sizeof(srec));
+                            kekcall(KEKCALL_DUMP_MEM, sess_ptr, (uintptr_t)srec, sizeof(srec));
+                            klog_printf("[SESS_REC] current session_record:\n");
+                            for (int row = 0; row < 64; row += 16) {
+                                klog_printf("[SR+%03x] %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                                            row,
+                                            srec[row+0], srec[row+1], srec[row+2], srec[row+3],
+                                            srec[row+4], srec[row+5], srec[row+6], srec[row+7]);
+                            }
+                            /* Backup orig fields */
+                            uint32_t bk_handle = 0, bk_flags = 0, bk_cid_hi = 0, bk_cid_lo = 0;
+                            kekcall(KEKCALL_DUMP_MEM, sess_ptr + 0,  (uintptr_t)&bk_handle, 4);
+                            kekcall(KEKCALL_DUMP_MEM, sess_ptr + 4,  (uintptr_t)&bk_flags,  4);
+                            kekcall(KEKCALL_DUMP_MEM, sess_ptr + 32, (uintptr_t)&bk_cid_hi, 4);
+                            kekcall(KEKCALL_DUMP_MEM, sess_ptr + 36, (uintptr_t)&bk_cid_lo, 4);
+                            klog_printf("[SR_BAK] handle=0x%x flags=0x%x cid_hi=0x%x cid_lo=0x%x\n",
+                                        bk_handle, bk_flags, bk_cid_hi, bk_cid_lo);
+                            /* Poke fake values via WRITE64 — each covers 2 fields */
+                            /* [+0]=handle 0xC0FFEE, [+4]=flags 0xBEEF */
+                            kekcall(27, sess_ptr + 0ULL,
+                                    (uint64_t)0xBEEF00000000C0FFEEULL, 0);
+                            /* [+32]=cid_hi 0xAAAABBBB, [+36]=cid_lo 0xCCCCDDDD */
+                            kekcall(27, sess_ptr + 32ULL,
+                                    (uint64_t)0xCCCCDDDDAAAABBBBULL, 0);
+                            klog_printf("[SR_POKE] handle=0xC0FFEE flags=0xBEEF cid=0xAAAABBBB CCCCDDDD\n");
+                            /* Call B_28 again */
+                            uint8_t a28f[20] = {0};
+                            errno = 0;
+                            int ir = ioctl(jfd, 0x4014421c, a28f);
+                            int ie = errno;
+                            klog_printf("[B28_FAKE] ret=%d errno=%d out20=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                        ir, ie,
+                                        a28f[0],a28f[1],a28f[2],a28f[3],
+                                        a28f[4],a28f[5],a28f[6],a28f[7],
+                                        a28f[8],a28f[9],a28f[10],a28f[11],
+                                        a28f[12],a28f[13],a28f[14],a28f[15],
+                                        a28f[16],a28f[17],a28f[18],a28f[19]);
+                            /* Restore */
+                            kekcall(27, sess_ptr + 0ULL,
+                                    ((uint64_t)bk_flags << 32) | (uint64_t)bk_handle, 0);
+                            kekcall(27, sess_ptr + 32ULL,
+                                    ((uint64_t)bk_cid_lo << 32) | (uint64_t)bk_cid_hi, 0);
+                            klog_printf("[SR_RESTORE] done\n");
+                        }
+                    }
+
+                    /* -----------------------------------------------------------
                      * B_11_LEGIT: пробуем ioctl B_11 с корректным форматом,
                      * выведенным из offline reverse d_ioctl:
                      *   buf[0..3] = 0x14 (= 20, видимо size tag)
