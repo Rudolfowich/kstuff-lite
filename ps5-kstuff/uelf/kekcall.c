@@ -1269,30 +1269,48 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         }
 
         if (found_fd_files) {
-            /* Ищем struct file* в fdescent слотах (stride 0x18, 0x20, 0x28, 0x30) */
-            for (int stride = 0x18; stride <= 0x30; stride += 8) {
-                uint64_t cand_m = 0, cand_n = 0;
-                kpeek64_checked(found_fd_files + 8 + (uint64_t)target_fd_mp4 * stride, &cand_m);
-                kpeek64_checked(found_fd_files + 8 + (uint64_t)target_fd_null * stride, &cand_n);
-                if ((cand_m >> 48) == 0xffff && (cand_n >> 48) == 0xffff && cand_m != cand_n) {
-                    found_fp_mp4 = cand_m;
-                    found_fp_null = cand_n;
-                    break;
-                }
+            /* 1. ДАМП начала fdt для определения header'а */
+            for (int i = 0; i < 64; i += 8) {
+                uint64_t v = 0;
+                kpeek64_checked(found_fd_files + i, &v);
+                klog("[FDT+0x%x] = 0x%llx\n", i, (unsigned long long)v);
             }
-            /* Если stride смещен, пробуем по слотам */
-            if (!found_fp_mp4) {
-                for (int s = 0; s < 32; s++) {
-                    uint64_t val = 0;
-                    kpeek64_checked(found_fd_files + (uint64_t)s * 8, &val);
-                    if ((val >> 48) == 0xffff && (val >> 40) != 0xffffff) {
-                        if (!found_fp_mp4) found_fp_mp4 = val;
-                        else if (!found_fp_null && val != found_fp_mp4) {
-                            found_fp_null = val;
-                            break;
+
+            /* 2. Для stdin (fd=0) и stdout (fd=1) ищем valid heap pointers */
+            int best_header = -1;
+            int best_stride = -1;
+
+            for (int stride = 0x18; stride <= 0x30; stride += 8) {
+                for (int header = 0; header <= 0x20; header += 8) {
+                    int match_count = 0;
+                    for (int test_fd = 0; test_fd < 3; test_fd++) {
+                        uint64_t fp = 0;
+                        kpeek64_checked(found_fd_files + header + (uint64_t)test_fd * stride, &fp);
+                        if ((fp >> 48) == 0xffff && (fp >> 40) != 0xffffff && fp != 0) {
+                            klog("[STRIDE_TEST] fd=%d header=0x%x stride=0x%x fp=0x%llx\n",
+                                 test_fd, header, stride, (unsigned long long)fp);
+                            match_count++;
                         }
                     }
+                    if (match_count >= 2 && best_header == -1) {
+                        best_header = header;
+                        best_stride = stride;
+                    }
                 }
+            }
+
+            if (best_header != -1 && best_stride != -1) {
+                kpeek64_checked(found_fd_files + best_header + (uint64_t)target_fd_mp4 * best_stride, &found_fp_mp4);
+                kpeek64_checked(found_fd_files + best_header + (uint64_t)target_fd_null * best_stride, &found_fp_null);
+                klog("[FDT_RESOLVED] using header=0x%x stride=0x%x -> fp_mp4=0x%llx fp_null=0x%llx\n",
+                     best_header, best_stride, (unsigned long long)found_fp_mp4, (unsigned long long)found_fp_null);
+            } else {
+                /* fallback: прямое сканирование слотов */
+                uint64_t cand_m = 0, cand_n = 0;
+                kpeek64_checked(found_fd_files + (uint64_t)target_fd_mp4 * 0x18, &cand_m);
+                kpeek64_checked(found_fd_files + (uint64_t)target_fd_null * 0x18, &cand_n);
+                found_fp_mp4 = cand_m;
+                found_fp_null = cand_n;
             }
         }
 
@@ -1308,7 +1326,7 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
             copy_to_kernel(user_buf, out, sizeof(out));
         }
 
-        args[RAX] = found_fp_mp4 ? 0 : 1;
+        args[RAX] = (found_fp_mp4 && found_fp_null && found_fp_mp4 != found_fp_null) ? 0 : 1;
         return 0;
     }
     else if(nr == 37)
