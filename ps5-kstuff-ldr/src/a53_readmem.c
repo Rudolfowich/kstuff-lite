@@ -1125,11 +1125,12 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
             uint64_t verified_fd_files = 0;
 
             if (my_curproc) {
-                uint8_t pbuf[0x400] = {0};
-                kekcall(KEKCALL_DUMP_MEM, my_curproc, (uintptr_t)pbuf, 0x400);
+                klog_printf("[P_SCAN] starting safe scan of proc=0x%llx\n", (unsigned long long)my_curproc);
+                for (int off = 0; off < 0x200; off += 8) {
+                    uint64_t v = 0;
+                    long r1 = kekcall(KEKCALL_SAFE_PEEK, my_curproc + (uint64_t)off, (uintptr_t)&v, 0);
+                    if (r1 != 0) continue;
 
-                for (int off = 0; off < 0x400; off += 8) {
-                    uint64_t v = *(uint64_t*)(pbuf + off);
                     /* Проверка 1: heap pointer (0xffff[89a-f]..., не kernel .text 0xffffffff...) */
                     if ((v >> 48) != 0xffff || (v >> 40) == 0xffffff) continue;
 
@@ -1160,21 +1161,14 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
             uint32_t f_cdevpriv_off = 0;
 
             if (p_fd && verified_fd_files && fd_mp4 >= 0) {
-                uint8_t fdbuf[0x400] = {0};
-                kekcall(KEKCALL_DUMP_MEM, verified_fd_files, (uintptr_t)fdbuf, 0x400);
-
                 klog_printf("[FDT_RAW_SLOTS]:\n");
                 for (int s = 0; s < 24; s++) {
-                    uint64_t val = *(uint64_t*)(fdbuf + s * 8);
+                    uint64_t val = 0;
+                    kekcall(KEKCALL_SAFE_PEEK, verified_fd_files + (uint64_t)s * 8, (uintptr_t)&val, 0);
                     klog_printf("  slot[%02d] (+0x%02x) = 0x%016llx\n", s, s * 8, (unsigned long long)val);
-                }
-
-                /* Ищем слоты heap pointers */
-                for (int s = 0; s < 24; s++) {
-                    uint64_t cand = *(uint64_t*)(fdbuf + s * 8);
-                    if ((cand >> 48) == 0xffff && (cand >> 40) != 0xffffff) {
-                        if (!fp_mp4) fp_mp4 = cand;
-                        else if (!fp_null && cand != fp_mp4) fp_null = cand;
+                    if ((val >> 48) == 0xffff && (val >> 40) != 0xffffff) {
+                        if (!fp_mp4) fp_mp4 = val;
+                        else if (!fp_null && val != fp_mp4) fp_null = val;
                     }
                 }
 
@@ -1190,8 +1184,10 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
             if (fp_mp4 && fp_null && (fp_mp4 >> 48) == 0xffff && (fp_null >> 48) == 0xffff) {
                 uint64_t f_mp4_buf[32] = {0};
                 uint64_t f_null_buf[32] = {0};
-                kekcall(KEKCALL_DUMP_MEM, fp_mp4, (uintptr_t)f_mp4_buf, 256);
-                kekcall(KEKCALL_DUMP_MEM, fp_null, (uintptr_t)f_null_buf, 256);
+                for (int i = 0; i < 24; i++) {
+                    kekcall(KEKCALL_SAFE_PEEK, fp_mp4 + (uint64_t)i * 8, (uintptr_t)&f_mp4_buf[i], 0);
+                    kekcall(KEKCALL_SAFE_PEEK, fp_null + (uint64_t)i * 8, (uintptr_t)&f_null_buf[i], 0);
+                }
 
                 klog_printf("[FILE_DIFF] offset: mp4_val vs null_val\n");
                 for (int i = 0; i < 24; i++) {
@@ -1224,7 +1220,7 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
 
                 /* Читаем текущее значение для бэкапа */
                 uint64_t bk = 0;
-                kekcall(KEKCALL_DUMP_MEM, fp_mp4 + inj_off, (uintptr_t)&bk, 8);
+                kekcall(KEKCALL_SAFE_PEEK, fp_mp4 + inj_off, (uintptr_t)&bk, 0);
 
                 /* Инжектируем фиктивный softc (например адрес cdev или валидный kernel буфер) */
                 kekcall(27 /* WRITE64 */, fp_mp4 + inj_off, dedicated_mp4_cdev, 0);
