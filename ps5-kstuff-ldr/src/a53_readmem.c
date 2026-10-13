@@ -537,33 +537,55 @@ probe_opened_mp4_fd(int fd, const char *name)
         /* --------------------------------------------------------------------- */
         /* RING 0 FP & CDEVPRIV INJECTION DIRECTLY ON THE LIVE OPENED FD         */
         /* --------------------------------------------------------------------- */
-        klog_printf("[LIVE_FP] === Resolving struct file* for live fd=%d ===\n", fd);
-        int fd_ref = 1; /* stdout гарантированно открыт */
-        uint64_t fd_info[40] = {0};
-        kekcall(KEKCALL_GET_FD_INFO, (uint64_t)fd, (uint64_t)fd_ref, (uintptr_t)fd_info);
-        uint64_t fp_live = fd_info[2];
-        uint64_t fp_ref  = fd_info[3];
+        klog_printf("[LIVE_FP] === Fresh FDT dump after successful open of %s (fd=%d) ===\n", name, fd);
 
-        /* Если fp_live на точном слоте пуст, берём найденный в fdt живой дескриптор */
+        /* Свежий вызов KEKCALL_GET_FD_INFO: fd_live=fd (8), fd_ref=1 (stdout) */
+        uint64_t live_info[40] = {0};
+        kekcall(KEKCALL_GET_FD_INFO, (uint64_t)fd, 1ULL, (uintptr_t)live_info);
+        uint64_t live_p_fd = live_info[0];
+        uint64_t live_fdt  = live_info[1];
+
+        klog_printf("[LIVE_FP] p_fd=0x%llx fdt=0x%llx\n",
+                    (unsigned long long)live_p_fd, (unsigned long long)live_fdt);
+
+        /* Печатаем СВЕЖИЙ дамп таблицы FDT прямо сейчас (после open) */
+        for (int i = 0; i < 20; i++) {
+            klog_printf("[LIVE_FDT+0x%02x] (fd=%d) = 0x%016llx\n",
+                        i * 8, (i >= 2 ? i - 2 : -1), (unsigned long long)live_info[5 + i]);
+        }
+
+        /* Точный слот для fd: fdt + 0x10 + fd * 8 -> в live_info это индекс 5 + 2 + fd */
+        uint64_t fp_live = live_info[5 + 2 + fd];
+
+        /* Если слот fd пуст, пробуем overflow table: *(p_fd + 0x08) -> *(fd_files + 0x08 + fd * 8) */
         if (!fp_live || (fp_live >> 48) != 0xffff) {
-            /* Проверяем слоты fdt: +0x58 (индекс 5+9), +0x50 (5+8), +0x48 (5+7) */
-            if ((fd_info[5 + 9] >> 48) == 0xffff && (fd_info[5 + 9] >> 40) != 0xffffff) {
-                fp_live = fd_info[5 + 9];
-            } else {
-                for (int s = 2; s < 16; s++) {
-                    uint64_t cand = fd_info[5 + s];
-                    if ((cand >> 48) == 0xffff && (cand >> 40) != 0xffffff && cand != fp_ref) {
-                        fp_live = cand;
-                        break;
-                    }
-                }
+            uint64_t fd_files = 0;
+            kekcall(KEKCALL_DUMP_MEM, live_p_fd + 0x08ULL, (uintptr_t)&fd_files, 8);
+            if ((fd_files >> 48) == 0xffff) {
+                kekcall(KEKCALL_DUMP_MEM, fd_files + 0x08ULL + (uint64_t)fd * 8ULL, (uintptr_t)&fp_live, 8);
+                klog_printf("[LIVE_FP] overflow lookup: fd_files=0x%llx -> fp_live=0x%llx\n",
+                            (unsigned long long)fd_files, (unsigned long long)fp_live);
             }
         }
 
-        klog_printf("[LIVE_FP] resolved: fp_live=0x%llx fp_ref=0x%llx\n",
+        /* Открываем свежий /dev/null прямо сейчас для гарантированного live ref */
+        int fd_null_live = open("/dev/null", O_RDWR);
+        uint64_t fp_ref = 0;
+        if (fd_null_live >= 0) {
+            uint64_t null_info[40] = {0};
+            kekcall(KEKCALL_GET_FD_INFO, (uint64_t)fd_null_live, 1ULL, (uintptr_t)null_info);
+            fp_ref = null_info[5 + 2 + fd_null_live];
+            klog_printf("[LIVE_FP] live /dev/null opened: fd=%d -> fp_ref=0x%llx\n",
+                        fd_null_live, (unsigned long long)fp_ref);
+        }
+        if (!fp_ref || (fp_ref >> 48) != 0xffff) {
+            fp_ref = live_info[5 + 2 + 1]; /* fallback: stdout (fd=1) */
+        }
+
+        klog_printf("[LIVE_FP] FINAL PAIR: mp4 fp_live=0x%llx, ref fp_ref=0x%llx\n",
                     (unsigned long long)fp_live, (unsigned long long)fp_ref);
 
-        if (fp_live && (fp_live >> 48) == 0xffff) {
+        if (fp_live && (fp_live >> 48) == 0xffff && fp_ref && (fp_ref >> 48) == 0xffff) {
             uint64_t diff_table[32] = {0};
             uint32_t f_cdevpriv_off = (uint32_t)kekcall(KEKCALL_DIFF_FP, fp_live, fp_ref, (uintptr_t)diff_table);
             klog_printf("[LIVE_FP] detected candidate offset: +0x%x\n", f_cdevpriv_off);
@@ -601,6 +623,7 @@ probe_opened_mp4_fd(int fd, const char *name)
                 }
             }
         }
+        if (fd_null_live >= 0) close(fd_null_live);
 
         /* Шаг 1: Сканирование ioctl диапазонов (включая расширенные группы Sony M, D, AF) */
         uint8_t ibuf[256] = {0};
