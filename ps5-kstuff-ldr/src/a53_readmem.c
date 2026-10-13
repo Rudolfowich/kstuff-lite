@@ -3167,7 +3167,17 @@ probe_mp4_device(uint64_t curproc_hint)
  * ==================================================================== */
 
 #ifndef A53_DRY_RUN
-#define A53_DRY_RUN 0
+/* DANGER: A53_DRY_RUN=0 writes to A53 SRAM via A_11 ioctls.
+ *
+ * On 13.60, applying the 11.60 profile_55 clone (profile_56) corrupts
+ * A53 PFS/crypto code — PS5 becomes unresponsive: cannot install, delete,
+ * reboot, or launch anything that touches PFS. Only hard power cycle
+ * recovers. Transport works; content is wrong for 13.60.
+ *
+ * Keep this 1 until a 13.60-specific profile with correct A53 addresses
+ * is produced (requires A53 read primitive + firmware reverse).
+ */
+#define A53_DRY_RUN 1
 #endif
 
 /* ARM64 B/BL encoder. opcode = 0x14000000 (B) or 0x94000000 (BL). */
