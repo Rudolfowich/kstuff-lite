@@ -1373,6 +1373,78 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         klog_printf("[AUTH_MUTATE_TEST] === END ===\n");
     }
 
+    /* ========================================================================= */
+    /* MP4_GATE_TEST: читаем kernel-global (DAC-check flag для mp4/dump_for_decid*/
+    /* найденный в DOPEN_HEX chain of callers) и перебираем значения 0..7, после */
+    /* каждой записи — пробуем open mp4/dump_for_decid, затем восстанавливаем.   */
+    /* kbase+0xc2446c = global, kbase+0x2c5c310 = debug format string.          */
+    /* ========================================================================= */
+    {
+        uint64_t kbase_now = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+        if (kbase_now > 0xffffffff00000000ULL) {
+            uint64_t global_va = kbase_now + 0xc2446cULL;
+            uint64_t string_va = kbase_now + 0x2c5c310ULL;
+
+            klog_printf("[MP4_GATE] kbase=0x%llx global_va=0x%llx string_va=0x%llx\n",
+                        (unsigned long long)kbase_now,
+                        (unsigned long long)global_va,
+                        (unsigned long long)string_va);
+
+            /* Читаем текущее значение глобала и строку рядом */
+            uint64_t orig_val = 0;
+            kekcall(KEKCALL_DUMP_MEM, global_va, (uintptr_t)&orig_val, 8);
+            klog_printf("[MP4_GATE] CURRENT global = 0x%016llx\n",
+                        (unsigned long long)orig_val);
+
+            uint8_t strbuf[128] = {0};
+            kekcall(KEKCALL_DUMP_MEM, string_va, (uintptr_t)strbuf, sizeof(strbuf));
+            /* защищённо печатаем первые 100 символов */
+            strbuf[sizeof(strbuf)-1] = 0;
+            klog_printf("[MP4_GATE] near-string: '%.*s'\n", 100, (char*)strbuf);
+
+            /* Перебираем значения 0..7. Низшие 32 бита — то что сравнивают
+             * check-функции (mov ecx, [rip+..] — 32-битное чтение). */
+            for (uint32_t probe = 0; probe < 8; probe++) {
+                uint64_t test_val = (orig_val & 0xffffffff00000000ULL) | (uint64_t)probe;
+                long wr = kekcall(27 /* KEKCALL_WRITE64 */, global_va, test_val, 0);
+
+                uint64_t readback = 0;
+                kekcall(KEKCALL_DUMP_MEM, global_va, (uintptr_t)&readback, 8);
+                klog_printf("[GATE_%u] wr_ret=%ld wrote=0x%llx readback=0x%llx\n",
+                            probe, wr,
+                            (unsigned long long)test_val,
+                            (unsigned long long)readback);
+
+                errno = 0;
+                int gfd = open("/dev/mp4/dump_for_decid", O_RDWR);
+                int ge  = errno;
+                klog_printf("[GATE_%u_OPEN] O_RDWR fd=%d errno=%d\n", probe, gfd, ge);
+                if (gfd < 0) {
+                    errno = 0;
+                    gfd = open("/dev/mp4/dump_for_decid", O_RDONLY);
+                    ge  = errno;
+                    klog_printf("[GATE_%u_OPEN] O_RDONLY fd=%d errno=%d\n", probe, gfd, ge);
+                }
+                if (gfd >= 0) {
+                    klog_printf("[GATE_%u_OPEN] *** SUCCESS *** probe=%u opened mp4/dump_for_decid!\n",
+                                probe, probe);
+                    close(gfd);
+                }
+            }
+
+            /* Восстанавливаем исходное значение глобала */
+            long rr = kekcall(27 /* KEKCALL_WRITE64 */, global_va, orig_val, 0);
+            uint64_t final_readback = 0;
+            kekcall(KEKCALL_DUMP_MEM, global_va, (uintptr_t)&final_readback, 8);
+            klog_printf("[MP4_GATE] RESTORED orig=0x%llx (wr_ret=%ld, readback=0x%llx) %s\n",
+                        (unsigned long long)orig_val, rr,
+                        (unsigned long long)final_readback,
+                        (final_readback == orig_val) ? "OK" : "MISMATCH");
+        } else {
+            klog_printf("[MP4_GATE] skipped: kbase invalid (0x%llx)\n", (unsigned long long)kbase_now);
+        }
+    }
+
     /* ------------------------------------------------------------------------- */
     /* ДЕКОДИРОВАНИЕ TRAMPOLINE И ДАМП РЕАЛЬНОГО .text ДЛЯ d_write, d_ioctl, etc */
     /* ------------------------------------------------------------------------- */
