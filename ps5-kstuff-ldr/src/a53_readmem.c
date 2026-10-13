@@ -1098,144 +1098,160 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     /* ========================================================================= */
     /* ТЕСТ 1: DUMP И DIFF struct file ДЛЯ fd_mp4 И fd_ioc                      */
     /* ========================================================================= */
+    /* ТЕСТ 1: DUMP И DIFF struct file ДЛЯ fd_mp4 И fd_ioc                      */
+    /* ========================================================================= */
     klog_printf("[FILE_TEST] === TEST 1: Dump and diff struct file for open fds ===\n");
-    if (dedicated_mp4_csw) {
-        /* Временно ставим null_dopen для получения дескрипторов */
-        kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, null_dopen, 0);
 
-        int fd_mp4 = open("/dev/mp4/dump_for_decid", O_RDWR);
-        int fd_null = open("/dev/null", O_RDWR);
-        klog_printf("[FILE_TEST] opened fds: fd_mp4=%d fd_null=%d\n", fd_mp4, fd_null);
+    /* RE-INSTALL SIGSYS handler с SA_NODEFER для защиты от unmapped адресов ядра */
+    struct sigaction sa_ft;
+    memset(&sa_ft, 0, sizeof(sa_ft));
+    sa_ft.sa_handler = sigsys_handler;
+    sa_ft.sa_flags = SA_NODEFER;
+    sigaction(SIGSYS, &sa_ft, NULL);
 
-        /* Надежный curproc: scanned_proc получен из KEKCALL_SCAN_TD_UCRED */
-        uint64_t my_curproc = scanned_proc;
-        uint64_t p_fd = 0;
-        int p_fd_off = -1;
-        uint64_t verified_fd_files = 0;
+    if (sigsetjmp(g_sigsys_jmp, 1) == 0) {
+        if (dedicated_mp4_csw) {
+            /* Временно ставим null_dopen для получения дескрипторов */
+            kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, null_dopen, 0);
 
-        if (my_curproc) {
-            uint8_t pbuf[0x400] = {0};
-            kekcall(KEKCALL_DUMP_MEM, my_curproc, (uintptr_t)pbuf, 0x400);
+            int fd_mp4 = open("/dev/mp4/dump_for_decid", O_RDWR);
+            int fd_null = open("/dev/null", O_RDWR);
+            klog_printf("[FILE_TEST] opened fds: fd_mp4=%d fd_null=%d\n", fd_mp4, fd_null);
 
-            for (int off = 0; off < 0x400; off += 8) {
-                uint64_t v = *(uint64_t*)(pbuf + off);
-                /* Проверка 1: heap pointer (0xffff[89a-f]..., не kernel .text 0xffffffff...) */
-                if ((v >> 48) != 0xffff || (v >> 40) == 0xffffff) continue;
+            /* Надежный curproc: scanned_proc получен из KEKCALL_SCAN_TD_UCRED */
+            uint64_t my_curproc = scanned_proc;
+            uint64_t p_fd = 0;
+            int p_fd_off = -1;
+            uint64_t verified_fd_files = 0;
 
-                /* Проверка 2: v+0x08 тоже доступный heap pointer */
-                uint64_t fd_files = 0;
-                long r2 = kekcall(KEKCALL_SAFE_PEEK, v + 0x08ULL, (uintptr_t)&fd_files, 0);
-                if (r2 != 0 || (fd_files >> 48) != 0xffff || (fd_files >> 40) == 0xffffff) continue;
+            if (my_curproc) {
+                uint8_t pbuf[0x400] = {0};
+                kekcall(KEKCALL_DUMP_MEM, my_curproc, (uintptr_t)pbuf, 0x400);
 
-                /* Проверка 3: *(fd_files) или *(fd_files+8) — struct file* (heap, не text) */
-                uint64_t first_fp = 0;
-                long r3 = kekcall(KEKCALL_SAFE_PEEK, fd_files, (uintptr_t)&first_fp, 0);
-                if (r3 != 0 || (first_fp >> 48) != 0xffff || (first_fp >> 40) == 0xffffff) {
-                    r3 = kekcall(KEKCALL_SAFE_PEEK, fd_files + 0x08ULL, (uintptr_t)&first_fp, 0);
-                    if (r3 != 0 || (first_fp >> 48) != 0xffff || (first_fp >> 40) == 0xffffff) continue;
-                }
+                for (int off = 0; off < 0x400; off += 8) {
+                    uint64_t v = *(uint64_t*)(pbuf + off);
+                    /* Проверка 1: heap pointer (0xffff[89a-f]..., не kernel .text 0xffffffff...) */
+                    if ((v >> 48) != 0xffff || (v >> 40) == 0xffffff) continue;
 
-                /* ПРАВИЛЬНЫЙ p_fd найден */
-                p_fd = v;
-                p_fd_off = off;
-                verified_fd_files = fd_files;
-                klog_printf("[P_FD_REAL] offset=0x%x p_fd=0x%llx fd_files=0x%llx first_fp=0x%llx\n",
-                            p_fd_off, (unsigned long long)v, (unsigned long long)fd_files, (unsigned long long)first_fp);
-                break;
-            }
-        }
+                    /* Проверка 2: v+0x08 тоже доступный heap pointer */
+                    uint64_t fd_files = 0;
+                    long r2 = kekcall(KEKCALL_SAFE_PEEK, v + 0x08ULL, (uintptr_t)&fd_files, 0);
+                    if (r2 != 0 || (fd_files >> 48) != 0xffff || (fd_files >> 40) == 0xffffff) continue;
 
-        uint64_t fp_mp4 = 0, fp_null = 0;
-        uint32_t f_cdevpriv_off = 0;
+                    /* Проверка 3: *(fd_files) или *(fd_files+8) — struct file* (heap, не text) */
+                    uint64_t first_fp = 0;
+                    long r3 = kekcall(KEKCALL_SAFE_PEEK, fd_files, (uintptr_t)&first_fp, 0);
+                    if (r3 != 0 || (first_fp >> 48) != 0xffff || (first_fp >> 40) == 0xffffff) {
+                        r3 = kekcall(KEKCALL_SAFE_PEEK, fd_files + 0x08ULL, (uintptr_t)&first_fp, 0);
+                        if (r3 != 0 || (first_fp >> 48) != 0xffff || (first_fp >> 40) == 0xffffff) continue;
+                    }
 
-        if (p_fd && verified_fd_files && fd_mp4 >= 0) {
-            uint8_t fdbuf[0x400] = {0};
-            kekcall(KEKCALL_DUMP_MEM, verified_fd_files, (uintptr_t)fdbuf, 0x400);
-
-            klog_printf("[FDT_RAW_SLOTS]:\n");
-            for (int s = 0; s < 24; s++) {
-                uint64_t val = *(uint64_t*)(fdbuf + s * 8);
-                klog_printf("  slot[%02d] (+0x%02x) = 0x%016llx\n", s, s * 8, (unsigned long long)val);
-            }
-
-            /* Ищем слоты heap pointers */
-            for (int s = 0; s < 24; s++) {
-                uint64_t cand = *(uint64_t*)(fdbuf + s * 8);
-                if ((cand >> 48) == 0xffff && (cand >> 40) != 0xffffff) {
-                    if (!fp_mp4) fp_mp4 = cand;
-                    else if (!fp_null && cand != fp_mp4) fp_null = cand;
+                    /* ПРАВИЛЬНЫЙ p_fd найден */
+                    p_fd = v;
+                    p_fd_off = off;
+                    verified_fd_files = fd_files;
+                    klog_printf("[P_FD_REAL] offset=0x%x p_fd=0x%llx fd_files=0x%llx first_fp=0x%llx\n",
+                                p_fd_off, (unsigned long long)v, (unsigned long long)fd_files, (unsigned long long)first_fp);
+                    break;
                 }
             }
 
-            klog_printf("[FDT] candidates: fp_mp4=0x%llx fp_null=0x%llx\n",
-                        (unsigned long long)fp_mp4, (unsigned long long)fp_null);
-        }
+            uint64_t fp_mp4 = 0, fp_null = 0;
+            uint32_t f_cdevpriv_off = 0;
 
-        /* Выравниваем на 8 байт для безопасности */
-        fp_mp4 &= ~7ULL;
-        fp_null &= ~7ULL;
+            if (p_fd && verified_fd_files && fd_mp4 >= 0) {
+                uint8_t fdbuf[0x400] = {0};
+                kekcall(KEKCALL_DUMP_MEM, verified_fd_files, (uintptr_t)fdbuf, 0x400);
 
-        /* Дамп и diff 256 байт struct file: mp4 vs native null */
-        if (fp_mp4 && fp_null && (fp_mp4 >> 48) == 0xffff && (fp_null >> 48) == 0xffff) {
-            uint64_t f_mp4_buf[32] = {0};
-            uint64_t f_null_buf[32] = {0};
-            kekcall(KEKCALL_DUMP_MEM, fp_mp4, (uintptr_t)f_mp4_buf, 256);
-            kekcall(KEKCALL_DUMP_MEM, fp_null, (uintptr_t)f_null_buf, 256);
+                klog_printf("[FDT_RAW_SLOTS]:\n");
+                for (int s = 0; s < 24; s++) {
+                    uint64_t val = *(uint64_t*)(fdbuf + s * 8);
+                    klog_printf("  slot[%02d] (+0x%02x) = 0x%016llx\n", s, s * 8, (unsigned long long)val);
+                }
 
-            klog_printf("[FILE_DIFF] offset: mp4_val vs null_val\n");
-            for (int i = 0; i < 24; i++) {
-                uint32_t off = i * 8;
-                uint64_t vm = f_mp4_buf[i];
-                uint64_t vn = f_null_buf[i];
-                klog_printf("[FD +0x%02x] mp4=0x%016llx  null=0x%016llx  %s\n",
-                            off, (unsigned long long)vm, (unsigned long long)vn,
-                            (vm != vn) ? "DIFF" : "SAME");
+                /* Ищем слоты heap pointers */
+                for (int s = 0; s < 24; s++) {
+                    uint64_t cand = *(uint64_t*)(fdbuf + s * 8);
+                    if ((cand >> 48) == 0xffff && (cand >> 40) != 0xffffff) {
+                        if (!fp_mp4) fp_mp4 = cand;
+                        else if (!fp_null && cand != fp_mp4) fp_null = cand;
+                    }
+                }
 
-                /* Ищем кандидат на f_cdevpriv: у null есть kernel heap ptr, а у mp4 - 0 */
-                if (vm == 0 && (vn >> 48) == 0xffff && !f_cdevpriv_off) {
-                    f_cdevpriv_off = off;
+                klog_printf("[FDT] candidates: fp_mp4=0x%llx fp_null=0x%llx\n",
+                            (unsigned long long)fp_mp4, (unsigned long long)fp_null);
+            }
+
+            /* Выравниваем на 8 байт для безопасности */
+            fp_mp4 &= ~7ULL;
+            fp_null &= ~7ULL;
+
+            /* Дамп и diff 256 байт struct file: mp4 vs native null */
+            if (fp_mp4 && fp_null && (fp_mp4 >> 48) == 0xffff && (fp_null >> 48) == 0xffff) {
+                uint64_t f_mp4_buf[32] = {0};
+                uint64_t f_null_buf[32] = {0};
+                kekcall(KEKCALL_DUMP_MEM, fp_mp4, (uintptr_t)f_mp4_buf, 256);
+                kekcall(KEKCALL_DUMP_MEM, fp_null, (uintptr_t)f_null_buf, 256);
+
+                klog_printf("[FILE_DIFF] offset: mp4_val vs null_val\n");
+                for (int i = 0; i < 24; i++) {
+                    uint32_t off = i * 8;
+                    uint64_t vm = f_mp4_buf[i];
+                    uint64_t vn = f_null_buf[i];
+                    klog_printf("[FD +0x%02x] mp4=0x%016llx  null=0x%016llx  %s\n",
+                                off, (unsigned long long)vm, (unsigned long long)vn,
+                                (vm != vn) ? "DIFF" : "SAME");
+
+                    /* Ищем кандидат на f_cdevpriv: у null есть kernel heap ptr, а у mp4 - 0 */
+                    if (vm == 0 && (vn >> 48) == 0xffff && !f_cdevpriv_off) {
+                        f_cdevpriv_off = off;
+                    }
                 }
             }
-        }
 
-        klog_printf("[CDEVPRIV_CANDIDATE] detected offset: +0x%x\n", f_cdevpriv_off);
+            klog_printf("[CDEVPRIV_CANDIDATE] detected offset: +0x%x\n", f_cdevpriv_off);
 
-        /* Тест 1: write до инжекта */
-        uint8_t payload[4] = {0x01, 0x02, 0x03, 0x04};
-        ssize_t nw0 = write(fd_mp4, payload, sizeof(payload));
-        klog_printf("[WRITE_BEFORE] nw=%zd errno=%d\n", nw0, errno);
+            /* Тест 1: write до инжекта */
+            uint8_t payload[4] = {0x01, 0x02, 0x03, 0x04};
+            ssize_t nw0 = write(fd_mp4, payload, sizeof(payload));
+            klog_printf("[WRITE_BEFORE] nw=%zd errno=%d\n", nw0, errno);
 
-        /* Если офсет найден или пробуем стандартные +0x38, +0x40, +0x48: */
-        uint32_t target_offs[] = { f_cdevpriv_off, 0x38, 0x40, 0x48 };
-        for (int t = 0; t < 4; t++) {
-            uint32_t inj_off = target_offs[t];
-            if (!inj_off) continue;
+            /* Если офсет найден или пробуем стандартные +0x38, +0x40, +0x48: */
+            uint32_t target_offs[] = { f_cdevpriv_off, 0x38, 0x40, 0x48 };
+            for (int t = 0; t < 4; t++) {
+                uint32_t inj_off = target_offs[t];
+                if (!inj_off) continue;
 
-            /* Читаем текущее значение для бэкапа */
-            uint64_t bk = 0;
-            kekcall(KEKCALL_DUMP_MEM, fp_mp4 + inj_off, (uintptr_t)&bk, 8);
+                /* Читаем текущее значение для бэкапа */
+                uint64_t bk = 0;
+                kekcall(KEKCALL_DUMP_MEM, fp_mp4 + inj_off, (uintptr_t)&bk, 8);
 
-            /* Инжектируем фиктивный softc (например адрес cdev или валидный kernel буфер) */
-            kekcall(27 /* WRITE64 */, fp_mp4 + inj_off, dedicated_mp4_cdev, 0);
+                /* Инжектируем фиктивный softc (например адрес cdev или валидный kernel буфер) */
+                kekcall(27 /* WRITE64 */, fp_mp4 + inj_off, dedicated_mp4_cdev, 0);
 
-            ssize_t nw = write(fd_mp4, payload, sizeof(payload));
-            klog_printf("[INJECT_WRITE +0x%x] test nw=%zd errno=%d\n", inj_off, nw, errno);
+                ssize_t nw = write(fd_mp4, payload, sizeof(payload));
+                klog_printf("[INJECT_WRITE +0x%x] test nw=%zd errno=%d\n", inj_off, nw, errno);
 
-            /* Восстанавливаем */
-            kekcall(27 /* WRITE64 */, fp_mp4 + inj_off, bk, 0);
-            if (nw >= 0 || errno != 19) {
-                klog_printf("[BREAKTHROUGH!] ENODEV 19 BYPASSED AT +0x%x! nw=%zd errno=%d\n",
-                            inj_off, nw, errno);
-                break;
+                /* Восстанавливаем */
+                kekcall(27 /* WRITE64 */, fp_mp4 + inj_off, bk, 0);
+                if (nw >= 0 || errno != 19) {
+                    klog_printf("[BREAKTHROUGH!] ENODEV 19 BYPASSED AT +0x%x! nw=%zd errno=%d\n",
+                                inj_off, nw, errno);
+                    break;
+                }
             }
+
+            if (fd_mp4 >= 0) close(fd_mp4);
+            if (fd_null >= 0) close(fd_null);
+
+            /* Возвращаем оригинальный d_open */
+            kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, orig_dopen_calc, 0);
         }
-
-        if (fd_mp4 >= 0) close(fd_mp4);
-        if (fd_null >= 0) close(fd_null);
-
-        /* Возвращаем оригинальный d_open */
-        kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, orig_dopen_calc, 0);
+    } else {
+        klog_printf("[FILE_TEST] SIGSYS caught — safe exit\n");
     }
+
+    signal(SIGSYS, SIG_DFL);
 
 
 
