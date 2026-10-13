@@ -1764,14 +1764,53 @@ install_ppr_a53(uint32_t system_fw_version)
         return -2;
     }
 
-    /* STOP HERE for now. Actual patch sequence is TODO:
-     *   1. Open device for persistent session
-     *   2. a53_read_fw_identity() — compare with profile's expected id
-     *   3. If mismatch: ABORT (log the observed id for RE)
-     *   4. install_hooks_internal(profile) — 3 internal hooks
-     *   5. install_hooks_public(profile) — 10 public callers
-     *   6. verify readback — commit or rollback
-     */
+    /* ------------------------------------------------------------------------- */
+    /* KDUMP: Сохраняем дамп памяти ядра в /data/kdump.bin через KEKCALL 25     */
+    /* ------------------------------------------------------------------------- */
+    klog_printf("[KDUMP] Starting kernel memory dump to /data/kdump.bin via KEKCALL 25...\n");
+    uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+    klog_printf("[KDUMP] kdata_base = 0x%llx\n", (unsigned long long)kbase);
+
+    if (kbase > 0xffffffff00000000ULL) {
+        int kdfd = open("/data/kdump.bin", O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (kdfd < 0) {
+            klog_printf("[KDUMP] Failed to open /data/kdump.bin (errno=%d)\n", errno);
+        } else {
+            /* База ядра .text находится примерно на kbase - 0xD9D000 (или 0x1000000 назад) */
+            uint64_t scan_start = (kbase > 0x2000000ULL) ? (kbase - 0x1400000ULL) : kbase;
+            scan_start &= ~0xfffULL;
+            uint64_t scan_size = 32ULL * 1024ULL * 1024ULL; /* 32 MB с запасом (.text + .rodata + .data) */
+
+            klog_printf("[KDUMP] Dumping 0x%llx..0x%llx (size=%llu MB)...\n",
+                        (unsigned long long)scan_start,
+                        (unsigned long long)(scan_start + scan_size),
+                        (unsigned long long)(scan_size / (1024 * 1024)));
+
+            uint8_t chunk[4096];
+            uint64_t bytes_written = 0;
+            uint64_t pages_skipped = 0;
+
+            for (uint64_t cur = scan_start; cur < scan_start + scan_size; cur += sizeof(chunk)) {
+                memset(chunk, 0, sizeof(chunk));
+                long ret = kekcall(KEKCALL_SAFE_PEEK, cur, (uint64_t)chunk, sizeof(chunk));
+                if (ret == 0) {
+                    ssize_t w = write(kdfd, chunk, sizeof(chunk));
+                    if (w > 0) bytes_written += w;
+                } else {
+                    /* Не смапленная страница — заполняем нулями для сохранения смещений */
+                    memset(chunk, 0, sizeof(chunk));
+                    ssize_t w = write(kdfd, chunk, sizeof(chunk));
+                    if (w > 0) bytes_written += w;
+                    pages_skipped++;
+                }
+            }
+            close(kdfd);
+            klog_printf("[KDUMP] Dump complete! Wrote %llu bytes to /data/kdump.bin (skipped unmapped pages: %llu)\n",
+                        (unsigned long long)bytes_written, (unsigned long long)pages_skipped);
+        }
+    }
+
     klog_puts("[a53] skeleton stage complete; mailbox TX/RX not yet implemented\n");
     return 0;
 }
+
