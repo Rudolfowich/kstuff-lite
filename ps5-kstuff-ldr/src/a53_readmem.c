@@ -1104,8 +1104,8 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, null_dopen, 0);
 
         int fd_mp4 = open("/dev/mp4/dump_for_decid", O_RDWR);
-        int fd_ioc = open("/dev/deci_mp4_ioc", O_RDWR);
-        klog_printf("[FILE_TEST] opened fds: fd_mp4=%d fd_ioc=%d\n", fd_mp4, fd_ioc);
+        int fd_null = open("/dev/null", O_RDWR);
+        klog_printf("[FILE_TEST] opened fds: fd_mp4=%d fd_null=%d\n", fd_mp4, fd_null);
 
         /* Надежный curproc: scanned_proc получен из KEKCALL_SCAN_TD_UCRED */
         uint64_t my_curproc = scanned_proc;
@@ -1116,70 +1116,87 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         }
         klog_printf("[P_FD] proc+0x0 -> p_fd=0x%llx\n", (unsigned long long)p_fd);
 
-        uint64_t fp_mp4 = 0, fp_ioc = 0;
+        uint64_t fp_mp4 = 0, fp_null = 0;
+        uint32_t f_cdevpriv_off = 0;
+
         if (p_fd && (p_fd >> 48) == 0xffff && fd_mp4 >= 0) {
             uint64_t fd_ofiles = 0;
             kekcall(KEKCALL_DUMP_MEM, p_fd + 0x08ULL, (uintptr_t)&fd_ofiles, 8);
-            klog_printf("[FDT] fd_ofiles=0x%llx\n", (unsigned long long)fd_ofiles);
 
             if ((fd_ofiles >> 48) == 0xffff) {
                 uint8_t fdbuf[0x400] = {0};
                 kekcall(KEKCALL_DUMP_MEM, fd_ofiles, (uintptr_t)fdbuf, 0x400);
 
-                int nfiles = *(int*)(fdbuf + 0x00);
-                klog_printf("[FDT] nfiles=%d\n", nfiles);
+                /* Шаг 0x18 точно подтвержден в прошлом прогоне */
+                uint32_t stride = 0x18;
+                uint32_t slot_mp4 = 0x08 + fd_mp4 * stride;
+                uint32_t slot_null = (fd_null >= 0) ? (0x08 + fd_null * stride) : 0;
 
-                /* Пробуем разные размеры fdescent (0x18, 0x20, 0x28, 0x30) */
-                int chosen_stride = 0;
-                for (int fde_size = 0x18; fde_size <= 0x30; fde_size += 8) {
-                    uint32_t slot_off = 0x08 + fd_mp4 * fde_size;
-                    if (slot_off + 8 <= 0x400) {
-                        uint64_t fp = *(uint64_t*)(fdbuf + slot_off);
-                        klog_printf("[FDT fde_size=0x%x] fd=%d (off=+0x%x) fp=0x%llx\n",
-                                    fde_size, fd_mp4, slot_off, (unsigned long long)fp);
-                        if ((fp >> 48) == 0xffff && !fp_mp4) {
-                            fp_mp4 = fp;
-                            chosen_stride = fde_size;
-                        }
-                    }
-                }
+                if (slot_mp4 + 8 <= 0x400) fp_mp4 = *(uint64_t*)(fdbuf + slot_mp4);
+                if (slot_null && slot_null + 8 <= 0x400) fp_null = *(uint64_t*)(fdbuf + slot_null);
 
-                if (fd_ioc >= 0 && chosen_stride) {
-                    uint32_t slot_ioc = 0x08 + fd_ioc * chosen_stride;
-                    if (slot_ioc + 8 <= 0x400) {
-                        fp_ioc = *(uint64_t*)(fdbuf + slot_ioc);
-                    }
-                }
-                klog_printf("[FDT] resolved: fp_mp4=0x%llx fp_ioc=0x%llx (stride=0x%x)\n",
-                            (unsigned long long)fp_mp4, (unsigned long long)fp_ioc, chosen_stride);
+                klog_printf("[FDT] resolved: fp_mp4=0x%llx fp_null=0x%llx (stride=0x%x)\n",
+                            (unsigned long long)fp_mp4, (unsigned long long)fp_null, stride);
             }
         }
 
-        /* Дамп и diff 256 байт struct file */
-        if (fp_mp4) {
+        /* Дамп и diff 256 байт struct file: mp4 vs native null */
+        if (fp_mp4 && fp_null) {
             uint64_t f_mp4_buf[32] = {0};
-            uint64_t f_ioc_buf[32] = {0};
+            uint64_t f_null_buf[32] = {0};
             kekcall(KEKCALL_DUMP_MEM, fp_mp4, (uintptr_t)f_mp4_buf, 256);
-            if (fp_ioc) kekcall(KEKCALL_DUMP_MEM, fp_ioc, (uintptr_t)f_ioc_buf, 256);
+            kekcall(KEKCALL_DUMP_MEM, fp_null, (uintptr_t)f_null_buf, 256);
 
-            klog_printf("[STRUCT_FILE_DUMP] fp_mp4 @ 0x%llx:\n", (unsigned long long)fp_mp4);
-            for (int i = 0; i < 20; i++) {
+            klog_printf("[FILE_DIFF] offset: mp4_val vs null_val\n");
+            for (int i = 0; i < 24; i++) {
                 uint32_t off = i * 8;
                 uint64_t vm = f_mp4_buf[i];
-                uint64_t vi = f_ioc_buf[i];
-                klog_printf("  +0x%02x: mp4=0x%016llx  ioc=0x%016llx  %s\n",
-                            off, (unsigned long long)vm, (unsigned long long)vi,
-                            (vm != vi) ? "DIFF" : "SAME");
+                uint64_t vn = f_null_buf[i];
+                klog_printf("[FD +0x%02x] mp4=0x%016llx  null=0x%016llx  %s\n",
+                            off, (unsigned long long)vm, (unsigned long long)vn,
+                            (vm != vn) ? "DIFF" : "SAME");
+
+                /* Ищем кандидат на f_cdevpriv: у null есть kernel heap ptr, а у mp4 - 0 */
+                if (vm == 0 && (vn >> 48) == 0xffff && !f_cdevpriv_off) {
+                    f_cdevpriv_off = off;
+                }
             }
         }
 
-        /* Тест записи в fd_mp4 */
-        uint8_t test_payload[4] = {0x01, 0x02, 0x03, 0x04};
-        ssize_t nw = write(fd_mp4, test_payload, sizeof(test_payload));
-        klog_printf("[FILE_TEST] write to fd_mp4: nw=%zd errno=%d\n", nw, errno);
+        klog_printf("[CDEVPRIV_CANDIDATE] detected offset: +0x%x\n", f_cdevpriv_off);
+
+        /* Тест 1: write до инжекта */
+        uint8_t payload[4] = {0x01, 0x02, 0x03, 0x04};
+        ssize_t nw0 = write(fd_mp4, payload, sizeof(payload));
+        klog_printf("[WRITE_BEFORE] nw=%zd errno=%d\n", nw0, errno);
+
+        /* Если офсет найден или пробуем стандартные +0x38, +0x40, +0x48: */
+        uint32_t target_offs[] = { f_cdevpriv_off, 0x38, 0x40, 0x48 };
+        for (int t = 0; t < 4; t++) {
+            uint32_t inj_off = target_offs[t];
+            if (!inj_off) continue;
+
+            /* Читаем текущее значение для бэкапа */
+            uint64_t bk = 0;
+            kekcall(KEKCALL_DUMP_MEM, fp_mp4 + inj_off, (uintptr_t)&bk, 8);
+
+            /* Инжектируем фиктивный softc (например адрес cdev или валидный kernel буфер) */
+            kekcall(27 /* WRITE64 */, fp_mp4 + inj_off, dedicated_mp4_cdev, 0);
+
+            ssize_t nw = write(fd_mp4, payload, sizeof(payload));
+            klog_printf("[INJECT_WRITE +0x%x] test nw=%zd errno=%d\n", inj_off, nw, errno);
+
+            /* Восстанавливаем */
+            kekcall(27 /* WRITE64 */, fp_mp4 + inj_off, bk, 0);
+            if (nw >= 0 || errno != 19) {
+                klog_printf("[BREAKTHROUGH!] ENODEV 19 BYPASSED AT +0x%x! nw=%zd errno=%d\n",
+                            inj_off, nw, errno);
+                break;
+            }
+        }
 
         if (fd_mp4 >= 0) close(fd_mp4);
-        if (fd_ioc >= 0) close(fd_ioc);
+        if (fd_null >= 0) close(fd_null);
 
         /* Возвращаем оригинальный d_open */
         kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, orig_dopen_calc, 0);
