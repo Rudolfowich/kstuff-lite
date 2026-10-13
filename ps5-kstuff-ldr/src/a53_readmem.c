@@ -1119,7 +1119,7 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
             klog_printf("[FILE_TEST] opened fds: fd_mp4=%d fd_null=%d\n", fd_mp4, fd_null);
 
             /* Получаем указатели fd_files, fp_mp4, fp_null через KEKCALL 36 в Ring 0 */
-            uint64_t fd_info[8] = {0};
+            uint64_t fd_info[16] = {0};
             long r_info = kekcall(KEKCALL_GET_FD_INFO, (uint64_t)fd_mp4, (uint64_t)fd_null, (uintptr_t)fd_info);
             uint64_t p_fd = fd_info[0];
             uint64_t verified_fd_files = fd_info[1];
@@ -1130,6 +1130,10 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
             klog_printf("[RING0_FD_INFO] ret=%ld p_fd=0x%llx (off=0x%x) fdt=0x%llx fp_mp4=0x%llx fp_null=0x%llx\n",
                         r_info, (unsigned long long)p_fd, p_fd_off, (unsigned long long)verified_fd_files,
                         (unsigned long long)fp_mp4, (unsigned long long)fp_null);
+
+            for (int i = 0; i < 11; i++) {
+                klog_printf("[FDT+0x%02x] = 0x%016llx\n", i * 8, (unsigned long long)fd_info[5 + i]);
+            }
 
             /* Модуль 37: DIFF_FP прямо в Ring 0 */
             uint64_t diff_table[32] = {0};

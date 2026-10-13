@@ -1269,14 +1269,7 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         }
 
         if (found_fd_files) {
-            /* 1. ДАМП начала fdt для определения header'а */
-            for (int i = 0; i < 64; i += 8) {
-                uint64_t v = 0;
-                kpeek64_checked(found_fd_files + i, &v);
-                klog("[FDT+0x%x] = 0x%llx\n", i, (unsigned long long)v);
-            }
-
-            /* 2. Для stdin (fd=0) и stdout (fd=1) ищем valid heap pointers */
+            /* Без klog внутри ядра: определяем header и stride по fd=0,1,2 */
             int best_header = -1;
             int best_stride = -1;
 
@@ -1287,8 +1280,6 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
                         uint64_t fp = 0;
                         kpeek64_checked(found_fd_files + header + (uint64_t)test_fd * stride, &fp);
                         if ((fp >> 48) == 0xffff && (fp >> 40) != 0xffffff && fp != 0) {
-                            klog("[STRIDE_TEST] fd=%d header=0x%x stride=0x%x fp=0x%llx\n",
-                                 test_fd, header, stride, (unsigned long long)fp);
                             match_count++;
                         }
                     }
@@ -1302,27 +1293,31 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
             if (best_header != -1 && best_stride != -1) {
                 kpeek64_checked(found_fd_files + best_header + (uint64_t)target_fd_mp4 * best_stride, &found_fp_mp4);
                 kpeek64_checked(found_fd_files + best_header + (uint64_t)target_fd_null * best_stride, &found_fp_null);
-                klog("[FDT_RESOLVED] using header=0x%x stride=0x%x -> fp_mp4=0x%llx fp_null=0x%llx\n",
-                     best_header, best_stride, (unsigned long long)found_fp_mp4, (unsigned long long)found_fp_null);
-            } else {
-                /* fallback: прямое сканирование слотов */
-                uint64_t cand_m = 0, cand_n = 0;
-                kpeek64_checked(found_fd_files + (uint64_t)target_fd_mp4 * 0x18, &cand_m);
-                kpeek64_checked(found_fd_files + (uint64_t)target_fd_null * 0x18, &cand_n);
-                found_fp_mp4 = cand_m;
-                found_fp_null = cand_n;
             }
         }
 
         if (user_buf) {
-            uint64_t out[8] = {
-                found_p_fd,
-                found_fd_files,
-                found_fp_mp4,
-                found_fp_null,
-                (uint64_t)found_off,
-                0, 0, 0
-            };
+            /* Возвращаем в userland:
+             * [0] = p_fd
+             * [1] = fd_files
+             * [2] = fp_mp4
+             * [3] = fp_null
+             * [4] = p_fd_off
+             * [5..15] = первые 11 qwords из fdt для полного анализа в юзерленде
+             */
+            uint64_t out[16] = {0};
+            out[0] = found_p_fd;
+            out[1] = found_fd_files;
+            out[2] = found_fp_mp4;
+            out[3] = found_fp_null;
+            out[4] = (uint64_t)found_off;
+
+            if (found_fd_files) {
+                for (int i = 0; i < 11; i++) {
+                    kpeek64_checked(found_fd_files + (uint64_t)i * 8, &out[5 + i]);
+                }
+            }
+
             copy_to_kernel(user_buf, out, sizeof(out));
         }
 
