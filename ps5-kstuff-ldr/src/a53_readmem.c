@@ -1060,6 +1060,21 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     klog_printf("[READ_TEST] (.data @ 0x%llx): ret=%ld, first_u64=0x%lx\n",
                 (unsigned long long)data_v, r_data, *(unsigned long*)data_bytes);
 
+    /* Тест чтения .text ядра (null_dopen prologue) */
+    klog_printf("[XOM_TEST] === Dumping null_dopen .text prologue @ 0x%llx (0x40 bytes) ===\n",
+                (unsigned long long)null_dopen);
+    uint8_t code_buf[64] = {0};
+    long r_code = kekcall(KEKCALL_DUMP_MEM, null_dopen, (uintptr_t)code_buf, 64);
+    klog_printf("[XOM_TEST] dump ret=%ld\n", r_code);
+    for (int r = 0; r < 4; r++) {
+        klog_printf("[XOM_TEST +0x%02x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                    r * 16,
+                    code_buf[r*16 + 0], code_buf[r*16 + 1], code_buf[r*16 + 2], code_buf[r*16 + 3],
+                    code_buf[r*16 + 4], code_buf[r*16 + 5], code_buf[r*16 + 6], code_buf[r*16 + 7],
+                    code_buf[r*16 + 8], code_buf[r*16 + 9], code_buf[r*16 + 10], code_buf[r*16 + 11],
+                    code_buf[r*16 + 12], code_buf[r*16 + 13], code_buf[r*16 + 14], code_buf[r*16 + 15]);
+    }
+
     /* Шаг 3: Полная энумерация ВСЕХ процессов через KEKCALL_ENUM_ALLPROC (nr 29) */
     klog_printf("[AUTH_ENUM] === ENUMERATING ALL PROCESSES VIA KERNEL allproc SYMBOL (KEKCALL 29) ===\n");
 
