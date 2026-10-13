@@ -1720,7 +1720,7 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                             /* Poke fake values via WRITE64 — each covers 2 fields */
                             /* [+0]=handle 0xC0FFEE, [+4]=flags 0xBEEF */
                             kekcall(27, sess_ptr + 0ULL,
-                                    (uint64_t)0xBEEF00000000C0FFEEULL, 0);
+                                    (uint64_t)0x0000BEEF00C0FFEEULL, 0);
                             /* [+32]=cid_hi 0xAAAABBBB, [+36]=cid_lo 0xCCCCDDDD */
                             kekcall(27, sess_ptr + 32ULL,
                                     (uint64_t)0xCCCCDDDDAAAABBBBULL, 0);
