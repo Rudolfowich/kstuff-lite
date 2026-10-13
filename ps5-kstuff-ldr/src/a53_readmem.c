@@ -1814,6 +1814,41 @@ skip_md_patch: ;
                     }
                     if (md_fd >= 0) {
                         klog_printf("[MP4_DUMP_OPEN] *** SUCCESS *** /dev/mp4/dump opened (fd=%d)\n", md_fd);
+                        /* d_ioctl also has DAC check at some +0xXX. Patch same way.
+                         * Find d_ioctl: csw+0x38 standard offset. */
+                        uint64_t md_csw2 = 0;
+                        kekcall(KEKCALL_DUMP_MEM, g_cdev_mp4_dump + 0xb8ULL, (uintptr_t)&md_csw2, 8);
+                        uint64_t md_d_ioctl = 0;
+                        kekcall(KEKCALL_DUMP_MEM, md_csw2 + 0x38ULL, (uintptr_t)&md_d_ioctl, 8);
+                        klog_printf("[MP4_DUMP_IOCTL] csw=0x%llx d_ioctl=0x%llx\n",
+                                    (unsigned long long)md_csw2,
+                                    (unsigned long long)md_d_ioctl);
+                        uint8_t it[8] = {0};
+                        kekcall(KEKCALL_DUMP_MEM, md_d_ioctl, (uintptr_t)it, 8);
+                        uint64_t md_real_ioctl = md_d_ioctl;
+                        if (it[0] == 0xe9) {
+                            int32_t rel = (int32_t)(it[1] | (it[2]<<8) | (it[3]<<16) | (it[4]<<24));
+                            md_real_ioctl = md_d_ioctl + 5 + (int64_t)rel;
+                            klog_printf("[MP4_DUMP_IOCTL] trampoline -> real_d_ioctl=0x%llx\n",
+                                        (unsigned long long)md_real_ioctl);
+                        }
+                        /* Dump 256 bytes of real_d_ioctl */
+                        static uint8_t io_body[256];
+                        memset(io_body, 0, sizeof(io_body));
+                        kekcall(KEKCALL_DUMP_MEM, md_real_ioctl, (uintptr_t)io_body, sizeof(io_body));
+                        klog_printf("[MP4_DUMP_IOCTL] real_d_ioctl body 256 bytes:\n");
+                        for (int row = 0; row < 256; row += 32) {
+                            klog_printf("[MDIOCTL+%03x] %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                        row,
+                                        io_body[row+0],io_body[row+1],io_body[row+2],io_body[row+3],
+                                        io_body[row+4],io_body[row+5],io_body[row+6],io_body[row+7],
+                                        io_body[row+8],io_body[row+9],io_body[row+10],io_body[row+11],
+                                        io_body[row+12],io_body[row+13],io_body[row+14],io_body[row+15],
+                                        io_body[row+16],io_body[row+17],io_body[row+18],io_body[row+19],
+                                        io_body[row+20],io_body[row+21],io_body[row+22],io_body[row+23],
+                                        io_body[row+24],io_body[row+25],io_body[row+26],io_body[row+27],
+                                        io_body[row+28],io_body[row+29],io_body[row+30],io_body[row+31]);
+                        }
                         /* Try all 6 ioctl cmds on this device. The handler is in the
                          * same cdevsw, so same cmd numbers should work. Softc is per-cdev. */
                         {
