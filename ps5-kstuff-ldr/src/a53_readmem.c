@@ -1535,31 +1535,30 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                         }
                     }
 
-                    /* 2) IOCTL probe: пробуем _IO('m', 0..7) без данных + с мелким in/out */
-                    /* _IO(g,n)   = (0u<<30) | (0<<16) | (g<<8) | n   */
-                    /* _IOR(g,n,t)= (2u<<30) | (sz<<16) | (g<<8) | n  */
-                    /* _IOW(g,n,t)= (1u<<30) | (sz<<16) | (g<<8) | n  */
-                    static uint8_t iobuf[4096] = {0};
-                    for (int cmd = 0; cmd < 8; cmd++) {
-                        memset(iobuf, 0, sizeof(iobuf));
-                        unsigned int req_io = (0u << 30) | (0 << 16) | ('m' << 8) | cmd;
+                    /* 2) IOCTL REAL CMDs: разобраны оффлайн из d_ioctl switch
+                     *    0x4014421b = _IOW('B',27, 20-byte struct)
+                     *    0x4014421c = _IOW('B',28, 20-byte struct)
+                     *    0xc014420b = _IOWR('B',11, 20-byte struct)
+                     *    0xc0144215 = _IOWR('B',21, 20-byte struct)
+                     * Группа 'B' = 0x42, size=0x14=20 байт. */
+                    struct { uint32_t cmd; const char *tag; } mp4_cmds[] = {
+                        { 0x4014421b, "IOW_B_27"  },
+                        { 0x4014421c, "IOW_B_28"  },
+                        { 0xc014420b, "IOWR_B_11" },
+                        { 0xc0144215, "IOWR_B_21" },
+                    };
+                    for (int ci = 0; ci < 4; ci++) {
+                        uint8_t argbuf[20] = {0};
                         errno = 0;
-                        int ir = ioctl(jfd, req_io, iobuf);
+                        int ir = ioctl(jfd, mp4_cmds[ci].cmd, argbuf);
                         int ie = errno;
-                        klog_printf("[IOCTL_IO m,%d] req=0x%08x ret=%d errno=%d first8=%02x%02x%02x%02x%02x%02x%02x%02x\n",
-                                    cmd, req_io, ir, ie,
-                                    iobuf[0],iobuf[1],iobuf[2],iobuf[3],
-                                    iobuf[4],iobuf[5],iobuf[6],iobuf[7]);
-
-                        memset(iobuf, 0, sizeof(iobuf));
-                        unsigned int req_ior = (2u << 30) | (256u << 16) | ('m' << 8) | cmd;
-                        errno = 0;
-                        ir = ioctl(jfd, req_ior, iobuf);
-                        ie = errno;
-                        klog_printf("[IOCTL_IOR m,%d] req=0x%08x ret=%d errno=%d first16=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
-                                    cmd, req_ior, ir, ie,
-                                    iobuf[0],iobuf[1],iobuf[2],iobuf[3], iobuf[4],iobuf[5],iobuf[6],iobuf[7],
-                                    iobuf[8],iobuf[9],iobuf[10],iobuf[11], iobuf[12],iobuf[13],iobuf[14],iobuf[15]);
+                        klog_printf("[IOCTL_%s] req=0x%08x ret=%d errno=%d out20=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                    mp4_cmds[ci].tag, mp4_cmds[ci].cmd, ir, ie,
+                                    argbuf[0],argbuf[1],argbuf[2],argbuf[3],
+                                    argbuf[4],argbuf[5],argbuf[6],argbuf[7],
+                                    argbuf[8],argbuf[9],argbuf[10],argbuf[11],
+                                    argbuf[12],argbuf[13],argbuf[14],argbuf[15],
+                                    argbuf[16],argbuf[17],argbuf[18],argbuf[19]);
                     }
 
                     /* 3) После ioctl-попыток — ещё один read 4096 на случай если ioctl разогрел буфер */
