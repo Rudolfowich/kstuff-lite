@@ -1445,6 +1445,97 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         }
     }
 
+    /* ========================================================================= */
+    /* DOPEN_JMP_PATCH: пропускаем auth-chain в real d_open mp4/dump_for_decid.  */
+    /* На real_dopen+0x18 стоит `call target1` (5 байт). Заменяем на jmp +0x51   */
+    /* чтобы попасть прямо в softc init path @ offset 0x6e. Это должно и open   */
+    /* сделать успешным, и softc инициализировать (write/ioctl тогда ОК).       */
+    /* Безопасно: читаем 8 байт (патч+3 сохраняемых) → WRITE64 → open → RESTORE.*/
+    /* real_dopen вычисляем через csw+0x10 trampoline как в DOPEN_HEX.          */
+    /* ========================================================================= */
+    if (dedicated_mp4_csw) {
+        uint64_t orig_dopen2 = 0;
+        kekcall(KEKCALL_DUMP_MEM, dedicated_mp4_csw + 0x10ULL, (uintptr_t)&orig_dopen2, 8);
+        uint64_t real_dopen2 = orig_dopen2;
+        if (orig_dopen2 && (orig_dopen2 >> 48) == 0xffff) {
+            uint8_t tramp2[16] = {0};
+            kekcall(KEKCALL_DUMP_MEM, orig_dopen2, (uintptr_t)tramp2, 16);
+            if (tramp2[0] == 0xe9) {
+                int32_t rel32 = (int32_t)(tramp2[1] | (tramp2[2]<<8) | (tramp2[3]<<16) | (tramp2[4]<<24));
+                real_dopen2 = orig_dopen2 + 5 + (int64_t)rel32;
+            }
+        }
+        klog_printf("[DOPEN_JMP] real_dopen=0x%llx, patching +0x18 (call→jmp 0x6e)\n",
+                    (unsigned long long)real_dopen2);
+
+        if (real_dopen2 && (real_dopen2 >> 48) == 0xffff) {
+            uint64_t patch_addr = real_dopen2 + 0x18ULL;
+            uint64_t orig_qword = 0;
+            kekcall(KEKCALL_DUMP_MEM, patch_addr, (uintptr_t)&orig_qword, 8);
+            klog_printf("[DOPEN_JMP] saved orig 8 bytes at 0x%llx: 0x%016llx\n",
+                        (unsigned long long)patch_addr, (unsigned long long)orig_qword);
+
+            /* Новый qword: байты [0..4] = e9 51 00 00 00 (jmp +0x51), байты [5..7] = original */
+            uint8_t bytes[8];
+            memcpy(bytes, &orig_qword, 8);
+            bytes[0] = 0xe9;
+            bytes[1] = 0x51;
+            bytes[2] = 0x00;
+            bytes[3] = 0x00;
+            bytes[4] = 0x00;
+            uint64_t new_qword = 0;
+            memcpy(&new_qword, bytes, 8);
+
+            long wr = kekcall(27 /* KEKCALL_WRITE64 */, patch_addr, new_qword, 0);
+            uint64_t rb = 0;
+            kekcall(KEKCALL_DUMP_MEM, patch_addr, (uintptr_t)&rb, 8);
+            klog_printf("[DOPEN_JMP] wr_ret=%ld wrote=0x%016llx readback=0x%016llx %s\n",
+                        wr, (unsigned long long)new_qword, (unsigned long long)rb,
+                        (rb == new_qword) ? "PATCHED" : "WRITE-FAILED");
+
+            if (rb == new_qword) {
+                errno = 0;
+                int jfd = open("/dev/mp4/dump_for_decid", O_RDWR);
+                int je_err = errno;
+                klog_printf("[DOPEN_JMP_OPEN] O_RDWR fd=%d errno=%d\n", jfd, je_err);
+                if (jfd < 0) {
+                    errno = 0;
+                    jfd = open("/dev/mp4/dump_for_decid", O_RDONLY);
+                    je_err = errno;
+                    klog_printf("[DOPEN_JMP_OPEN] O_RDONLY fd=%d errno=%d\n", jfd, je_err);
+                }
+                if (jfd >= 0) {
+                    klog_printf("[DOPEN_JMP_OPEN] *** SUCCESS *** opened mp4/dump_for_decid with legitimate init!\n");
+                    /* Пробуем write и ioctl чтобы увидеть реально ли softc инициализирован */
+                    errno = 0;
+                    char tbuf[16] = "test";
+                    ssize_t nw = write(jfd, tbuf, 4);
+                    int we = errno;
+                    klog_printf("[DOPEN_JMP_OPEN] write(4 bytes) = %zd errno=%d\n", nw, we);
+
+                    errno = 0;
+                    ssize_t nr = read(jfd, tbuf, sizeof(tbuf));
+                    int re = errno;
+                    klog_printf("[DOPEN_JMP_OPEN] read(16 bytes) = %zd errno=%d first4=%02x %02x %02x %02x\n",
+                                nr, re,
+                                (unsigned char)tbuf[0], (unsigned char)tbuf[1],
+                                (unsigned char)tbuf[2], (unsigned char)tbuf[3]);
+
+                    close(jfd);
+                }
+            }
+
+            /* Восстанавливаем оригинальные 8 байт */
+            long rr = kekcall(27 /* KEKCALL_WRITE64 */, patch_addr, orig_qword, 0);
+            uint64_t final_rb = 0;
+            kekcall(KEKCALL_DUMP_MEM, patch_addr, (uintptr_t)&final_rb, 8);
+            klog_printf("[DOPEN_JMP] RESTORED orig=0x%016llx wr_ret=%ld readback=0x%016llx %s\n",
+                        (unsigned long long)orig_qword, rr,
+                        (unsigned long long)final_rb,
+                        (final_rb == orig_qword) ? "OK" : "MISMATCH-DANGER");
+        }
+    }
+
     /* ------------------------------------------------------------------------- */
     /* ДЕКОДИРОВАНИЕ TRAMPOLINE И ДАМП РЕАЛЬНОГО .text ДЛЯ d_write, d_ioctl, etc */
     /* ------------------------------------------------------------------------- */
