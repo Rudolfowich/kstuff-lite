@@ -1118,16 +1118,19 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
             int fd_null = open("/dev/null", O_RDWR);
             klog_printf("[FILE_TEST] opened fds: fd_mp4=%d fd_null=%d\n", fd_mp4, fd_null);
 
-            /* Получаем указатели fd_files, fp_mp4, fp_null через KEKCALL 36 в Ring 0 */
+            /* Если fd_null почему-то не открылся, используем stdin (fd=0) или stdout (fd=1) для diff */
+            int fd_ref = (fd_null >= 0) ? fd_null : 1;
+
+            /* Получаем указатели fd_files, fp_mp4, fp_ref через KEKCALL 36 в Ring 0 */
             uint64_t fd_info[40] = {0};
-            long r_info = kekcall(KEKCALL_GET_FD_INFO, (uint64_t)fd_mp4, (uint64_t)fd_null, (uintptr_t)fd_info);
+            long r_info = kekcall(KEKCALL_GET_FD_INFO, (uint64_t)fd_mp4, (uint64_t)fd_ref, (uintptr_t)fd_info);
             uint64_t p_fd = fd_info[0];
             uint64_t verified_fd_files = fd_info[1];
             uint64_t fp_mp4 = fd_info[2];
             uint64_t fp_null = fd_info[3];
             int p_fd_off = (int)fd_info[4];
 
-            klog_printf("[RING0_FD_INFO] ret=%ld p_fd=0x%llx (off=0x%x) fdt=0x%llx fp_mp4=0x%llx fp_null=0x%llx\n",
+            klog_printf("[RING0_FD_INFO] ret=%ld p_fd=0x%llx (off=0x%x) fdt=0x%llx fp_mp4=0x%llx fp_ref=0x%llx\n",
                         r_info, (unsigned long long)p_fd, p_fd_off, (unsigned long long)verified_fd_files,
                         (unsigned long long)fp_mp4, (unsigned long long)fp_null);
 
@@ -1135,10 +1138,23 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                 klog_printf("[FDT+0x%02x] = 0x%016llx\n", i * 8, (unsigned long long)fd_info[5 + i]);
             }
 
+            /* Если fp_null на fd=10 был 0, берём гарантированно открытый fd=1 (+0x18 в fdt) или fd=0 (+0x10) */
+            if (!fp_null || (fp_null >> 48) != 0xffff) {
+                fp_null = fd_info[5 + 1]; /* FDT+0x08 для fd=0 или +0x18 для fd=1: слоты 5+2, 5+3 */
+                if ((fp_null >> 48) != 0xffff) fp_null = fd_info[5 + 2]; /* fd=0: +0x10 */
+                klog_printf("[REF_FALLBACK] using ref fp from fdt: 0x%llx\n", (unsigned long long)fp_null);
+            }
+
             /* Модуль 37: DIFF_FP прямо в Ring 0 */
             uint64_t diff_table[32] = {0};
             uint32_t f_cdevpriv_off = (uint32_t)kekcall(KEKCALL_DIFF_FP, fp_mp4, fp_null, (uintptr_t)diff_table);
             klog_printf("[RING0_DIFF_FP] detected cdevpriv candidate offset: +0x%x\n", f_cdevpriv_off);
+
+            for (int i = 0; i < 16; i++) {
+                if (diff_table[i] != 0) {
+                    klog_printf("[DIFF_FP +0x%02x] xor=0x%016llx\n", i * 8, (unsigned long long)diff_table[i]);
+                }
+            }
 
             /* Тест write до инъекции softc */
             uint8_t payload[4] = {0x01, 0x02, 0x03, 0x04};
