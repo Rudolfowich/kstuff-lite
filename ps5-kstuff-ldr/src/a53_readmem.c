@@ -1349,6 +1349,14 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
 
 
 
+    /* ------------------------------------------------------------------------- */
+    /* ПРИНУДИТЕЛЬНО закрываем все лишние дескрипторы процесса (fd 3..64)        */
+    /* ------------------------------------------------------------------------- */
+    klog_printf("[CLEANUP] Closing extra fds 3..64 for predictable slot mapping...\n");
+    for (int i = 3; i < 64; i++) {
+        close(i);
+    }
+
     /* Шаг 4: патчим все найденные mp4 cdevsw */
     for (int m = 0; m < mp4_count; m++) {
         uint64_t target_csw = mp4_parent_csws[m];
@@ -1383,14 +1391,16 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
 
     for (int p = 0; p < (int)(sizeof(test_paths)/sizeof(test_paths[0])); p++) {
         const char *path = test_paths[p];
+        errno = 0;
         int fd = open(path, 0x0002 /* O_RDWR */);
         int err = errno;
-        klog_printf("[PROBE_NODE] '%s' -> fd=%d errno=%d\n", path, fd, err);
+        klog_printf("[PROBE_NODE] '%s' -> fd=%d (errno=%d)\n", path, fd, err);
         if (fd < 0 && err == 1 /* EPERM */) {
             /* Попробуем O_RDONLY */
+            errno = 0;
             fd = open(path, 0x0000 /* O_RDONLY */);
             err = errno;
-            klog_printf("[PROBE_NODE] '%s' (RDONLY) -> fd=%d errno=%d\n", path, fd, err);
+            klog_printf("[PROBE_NODE] '%s' (RDONLY) -> fd=%d (errno=%d)\n", path, fd, err);
         }
 
         if (fd >= 0) {
