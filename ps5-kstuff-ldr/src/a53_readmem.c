@@ -1867,15 +1867,10 @@ install_ppr_a53(uint32_t system_fw_version)
         }
     }
 
-    /* Device probe (runs xref_scan_text) */
-    uint64_t curproc_hint = (rc > 38) ? ext_buf[38] : 0;
-    if (probe_mp4_device(curproc_hint) != 0) {
-        klog_puts("[a53] MP4 device not accessible — abort\n");
-        return -2;
-    }
-
     /* ------------------------------------------------------------------------- */
     /* KDUMP: Сохраняем дамп памяти ядра в /data/kdump.bin через KEKCALL 25     */
+    /* ВАЖНО: выполняется ДО probe_mp4_device, потому что deep probe mp4-cdev   */
+    /* может висеть минутами на ioctl/write и до KDUMP управление не вернётся.  */
     /* ------------------------------------------------------------------------- */
     klog_printf("[KDUMP] Starting kernel memory dump to /data/kdump.bin via KEKCALL 25...\n");
     uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
@@ -1932,6 +1927,15 @@ install_ppr_a53(uint32_t system_fw_version)
             klog_printf("[KDUMP] Dump complete! Wrote %llu bytes to /data/kdump.bin (skipped unmapped pages: %llu)\n",
                         (unsigned long long)bytes_written, (unsigned long long)pages_skipped);
         }
+    }
+
+    /* Device probe (runs xref_scan_text). Запускается ПОСЛЕ KDUMP, т.к. deep
+     * probe может висеть минутами на ioctl/write mp4-cdev и прерывать все
+     * последующие шаги. */
+    uint64_t curproc_hint = (rc > 38) ? ext_buf[38] : 0;
+    if (probe_mp4_device(curproc_hint) != 0) {
+        klog_puts("[a53] MP4 device not accessible — abort\n");
+        return -2;
     }
 
     klog_puts("[a53] skeleton stage complete; mailbox TX/RX not yet implemented\n");
