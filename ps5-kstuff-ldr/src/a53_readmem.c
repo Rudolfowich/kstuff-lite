@@ -1119,20 +1119,20 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
 
             for (int off = 0; off < 0x400; off += 8) {
                 uint64_t v = *(uint64_t*)(pbuf + off);
-                /* Проверка 1: heap pointer (не kernel .text / .data 0xffffffff...) */
+                /* Проверка 1: heap pointer (0xffff[89a-f]..., не kernel .text 0xffffffff...) */
                 if ((v >> 48) != 0xffff || (v >> 40) == 0xffffff) continue;
 
-                /* Проверка 2: v+0x08 тоже heap pointer */
+                /* Проверка 2: v+0x08 тоже доступный heap pointer */
                 uint64_t fd_files = 0;
-                kekcall(KEKCALL_DUMP_MEM, v + 0x08ULL, (uintptr_t)&fd_files, 8);
-                if ((fd_files >> 48) != 0xffff || (fd_files >> 40) == 0xffffff) continue;
+                long r2 = kekcall(KEKCALL_SAFE_PEEK, v + 0x08ULL, (uintptr_t)&fd_files, 0);
+                if (r2 != 0 || (fd_files >> 48) != 0xffff || (fd_files >> 40) == 0xffffff) continue;
 
                 /* Проверка 3: *(fd_files) или *(fd_files+8) — struct file* (heap, не text) */
                 uint64_t first_fp = 0;
-                kekcall(KEKCALL_DUMP_MEM, fd_files, (uintptr_t)&first_fp, 8);
-                if ((first_fp >> 48) != 0xffff || (first_fp >> 40) == 0xffffff) {
-                    kekcall(KEKCALL_DUMP_MEM, fd_files + 0x08ULL, (uintptr_t)&first_fp, 8);
-                    if ((first_fp >> 48) != 0xffff || (first_fp >> 40) == 0xffffff) continue;
+                long r3 = kekcall(KEKCALL_SAFE_PEEK, fd_files, (uintptr_t)&first_fp, 0);
+                if (r3 != 0 || (first_fp >> 48) != 0xffff || (first_fp >> 40) == 0xffffff) {
+                    r3 = kekcall(KEKCALL_SAFE_PEEK, fd_files + 0x08ULL, (uintptr_t)&first_fp, 0);
+                    if (r3 != 0 || (first_fp >> 48) != 0xffff || (first_fp >> 40) == 0xffffff) continue;
                 }
 
                 /* ПРАВИЛЬНЫЙ p_fd найден */
