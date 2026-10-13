@@ -999,9 +999,6 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                     d, off, (unsigned long long)our_v, (unsigned long long)vid_v);
     }
 
-    uint32_t prison_offset = (uint32_t)diff_buf[1];
-    uint64_t cand_prison_ptr = diff_buf[3];
-
     /* ------------------------------------------------------------------------- */
     /* ГЛАВНЫЙ ТЕСТ: IN-PLACE MUTATION (КЛОНИРОВАНИЕ ПОЛЕЙ БЕЗ ПОДМЕНЫ УКАЗАТЕЛЯ) */
     /* ------------------------------------------------------------------------- */
