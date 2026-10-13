@@ -534,6 +534,57 @@ probe_opened_mp4_fd(int fd, const char *name)
     if (strstr(name, "dump_for_decid")) {
         klog_printf("[INIT_PROBE] === Starting comprehensive session init on %s (fd=%d) ===\n", name, fd);
 
+        /* --------------------------------------------------------------------- */
+        /* RING 0 FP & CDEVPRIV INJECTION DIRECTLY ON THE LIVE OPENED FD         */
+        /* --------------------------------------------------------------------- */
+        klog_printf("[LIVE_FP] === Resolving struct file* for live fd=%d ===\n", fd);
+        int fd_ref = 1; /* stdout гарантированно открыт */
+        uint64_t fd_info[40] = {0};
+        long r_info = kekcall(KEKCALL_GET_FD_INFO, (uint64_t)fd, (uint64_t)fd_ref, (uintptr_t)fd_info);
+        uint64_t fp_live = fd_info[2];
+        uint64_t fp_ref  = fd_info[3];
+        klog_printf("[LIVE_FP] ret=%ld fp_live=0x%llx fp_ref=0x%llx\n",
+                    r_info, (unsigned long long)fp_live, (unsigned long long)fp_ref);
+
+        if (fp_live && (fp_live >> 48) == 0xffff) {
+            uint64_t diff_table[32] = {0};
+            uint32_t f_cdevpriv_off = (uint32_t)kekcall(KEKCALL_DIFF_FP, fp_live, fp_ref, (uintptr_t)diff_table);
+            klog_printf("[LIVE_FP] detected candidate offset: +0x%x\n", f_cdevpriv_off);
+
+            for (int i = 0; i < 16; i++) {
+                if (diff_table[i] != 0) {
+                    klog_printf("[LIVE_DIFF +0x%02x] xor=0x%016llx\n", i * 8, (unsigned long long)diff_table[i]);
+                }
+            }
+
+            /* Инъекция cdev / softc в fp_live */
+            uint32_t target_offs[] = { f_cdevpriv_off, 0x38, 0x40, 0x48, 0x50 };
+            uint8_t test_cmd[8] = {0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+            for (int t = 0; t < 5; t++) {
+                uint32_t inj_off = target_offs[t];
+                if (!inj_off) continue;
+
+                /* Инжектируем cdev */
+                uint64_t bk = (uint64_t)kekcall(KEKCALL_INJECT_CDEVPRIV, fp_live, (uint64_t)inj_off, g_cdev_mp4_dump_for_decid);
+                klog_printf("[LIVE_INJECT +0x%x] injected cdev=0x%llx (old_val=0x%llx)\n",
+                            inj_off, (unsigned long long)g_cdev_mp4_dump_for_decid, (unsigned long long)bk);
+
+                errno = 0;
+                ssize_t nw = write(fd, test_cmd, 8);
+                int err = errno;
+                klog_printf("[LIVE_TEST +0x%x] nw=%zd errno=%d\n", inj_off, nw, err);
+
+                if (nw >= 0 || err != 19) {
+                    klog_printf("[BREAKTHROUGH!] ENODEV 19 BYPASSED ON LIVE FD AT +0x%x! nw=%zd errno=%d\n",
+                                inj_off, nw, err);
+                } else {
+                    /* Восстанавливаем старое значение */
+                    kekcall(KEKCALL_INJECT_CDEVPRIV, fp_live, (uint64_t)inj_off, bk);
+                }
+            }
+        }
+
         /* Шаг 1: Сканирование ioctl диапазонов (включая расширенные группы Sony M, D, AF) */
         uint8_t ibuf[256] = {0};
         uint32_t groups[] = {
