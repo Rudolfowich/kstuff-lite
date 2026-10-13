@@ -1095,88 +1095,108 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     klog_printf("[STEP_B] Discovered softc candidate: ptr=0x%llx at offset +0x%02x\n",
                 (unsigned long long)discovered_softc, discovered_softc_off);
 
-    /* ------------------------------------------------------------------------- */
-    /* ШАГ C — Копировать softc в mp4 cdev + open via nullopen + write           */
-    /* ------------------------------------------------------------------------- */
-    if (mp4_cdev_addr && dedicated_mp4_csw && discovered_softc) {
-        klog_printf("[STEP_C] === STEP C: Injecting discovered softc into mp4 cdev ===\n");
-        uint32_t target_off = discovered_softc_off ? discovered_softc_off : 0x70;
-
-        uint64_t orig_val = 0;
-        kekcall(KEKCALL_DUMP_MEM, mp4_cdev_addr + target_off, (uintptr_t)&orig_val, 8);
-        klog_printf("[STEP_C] mp4_cdev+0x%x orig=0x%llx -> inject=0x%llx\n",
-                    target_off, (unsigned long long)orig_val, (unsigned long long)discovered_softc);
-
-        /* Инъекция */
-        kekcall(27 /* WRITE64 */, mp4_cdev_addr + target_off, discovered_softc, 0);
-
-        /* Bypass open через null_dopen */
+    /* ========================================================================= */
+    /* ТЕСТ 1: DUMP И DIFF struct file ДЛЯ fd_mp4 И fd_ioc                      */
+    /* ========================================================================= */
+    klog_printf("[FILE_TEST] === TEST 1: Dump and diff struct file for open fds ===\n");
+    if (dedicated_mp4_csw) {
+        /* Временно ставим null_dopen для получения дескрипторов */
         kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, null_dopen, 0);
 
-        int fd_c = open("/dev/mp4/dump_for_decid", O_RDWR);
-        int ec = errno;
-        klog_printf("[DECI_SOFTC_INJECT] open fd=%d errno=%d\n", fd_c, ec);
+        int fd_mp4 = open("/dev/mp4/dump_for_decid", O_RDWR);
+        int fd_ioc = open("/dev/deci_mp4_ioc", O_RDWR);
+        klog_printf("[FILE_TEST] opened fds: fd_mp4=%d fd_ioc=%d\n", fd_mp4, fd_ioc);
 
-        if (fd_c >= 0) {
-            ssize_t nw = write(fd_c, "\x01\x02\x03\x04", 4);
-            int we = errno;
-            uint8_t rdata[256] = {0};
-            ssize_t nr = read(fd_c, rdata, sizeof(rdata));
-            int re = errno;
-            klog_printf("[DECI_SOFTC_INJECT] write nw=%zd (errno=%d) read nr=%zd (errno=%d)\n", nw, we, nr, re);
-            if (nr > 0) {
-                klog_printf("[DECI_SOFTC_INJECT] *** DATA RETURNED: first_u32=0x%08x ***\n", *(uint32_t*)rdata);
+        /* Ищем p_fd в curproc (+0x38..+0x60) */
+        uint64_t p_fd = 0;
+        uint32_t p_fd_off = 0;
+        if (scanned_proc) {
+            for (uint32_t po = 0x38; po <= 0x60; po += 8) {
+                uint64_t ptr = 0;
+                kekcall(KEKCALL_DUMP_MEM, scanned_proc + po, (uintptr_t)&ptr, 8);
+                if ((ptr >> 48) == 0xffff) {
+                    /* Проверяем: по ptr+0x00 или ptr+0x08 должен лежать массив ofiles */
+                    uint64_t fdt = 0;
+                    kekcall(KEKCALL_DUMP_MEM, ptr, (uintptr_t)&fdt, 8);
+                    if ((fdt >> 48) == 0xffff || fdt != 0) {
+                        p_fd = ptr;
+                        p_fd_off = po;
+                        break;
+                    }
+                }
             }
-            close(fd_c);
+        }
+        klog_printf("[FILE_TEST] found p_fd=0x%llx at proc+0x%x\n",
+                    (unsigned long long)p_fd, p_fd_off);
+
+        /* Во FreeBSD 12: struct filedesc содержит struct fdescenttable *fd_files (+0x08)
+         * или массив fd_ofiles прямо внутри */
+        uint64_t fp_mp4 = 0, fp_ioc = 0;
+        if (p_fd && fd_mp4 >= 0) {
+            /* Сканируем первые 256 байт p_fd в поисках указателей на struct file */
+            uint64_t fd_dump[32] = {0};
+            kekcall(KEKCALL_DUMP_MEM, p_fd, (uintptr_t)fd_dump, sizeof(fd_dump));
+            for (int i = 0; i < 32; i++) {
+                uint64_t cand_tbl = fd_dump[i];
+                if ((cand_tbl >> 48) == 0xffff) {
+                    /* Проверяем таблицу fdescent (элементы по 16 или 32 байта) */
+                    uint64_t fde[32] = {0};
+                    kekcall(KEKCALL_DUMP_MEM, cand_tbl, (uintptr_t)fde, sizeof(fde));
+                    /* Ищем fde_file на смещении fd_mp4 * stride */
+                    if (fd_mp4 < 16 && (fde[fd_mp4 * 2] >> 48) == 0xffff) {
+                        fp_mp4 = fde[fd_mp4 * 2];
+                        if (fd_ioc >= 0 && fd_ioc < 16) fp_ioc = fde[fd_ioc * 2];
+                        klog_printf("[FILE_TEST] found table via p_fd+0x%x: fp_mp4=0x%llx fp_ioc=0x%llx\n",
+                                    i * 8, (unsigned long long)fp_mp4, (unsigned long long)fp_ioc);
+                        break;
+                    }
+                }
+            }
         }
 
-        /* Восстановление */
-        kekcall(27 /* WRITE64 */, mp4_cdev_addr + target_off, orig_val, 0);
+        /* Дамп и diff 256 байт struct file */
+        if (fp_mp4) {
+            uint64_t f_mp4_buf[32] = {0};
+            uint64_t f_ioc_buf[32] = {0};
+            kekcall(KEKCALL_DUMP_MEM, fp_mp4, (uintptr_t)f_mp4_buf, 256);
+            if (fp_ioc) kekcall(KEKCALL_DUMP_MEM, fp_ioc, (uintptr_t)f_ioc_buf, 256);
+
+            klog_printf("[STRUCT_FILE_DUMP] fp_mp4 @ 0x%llx:\n", (unsigned long long)fp_mp4);
+            for (int i = 0; i < 16; i++) {
+                uint32_t off = i * 8;
+                uint64_t vm = f_mp4_buf[i];
+                uint64_t vi = f_ioc_buf[i];
+                klog_printf("  +0x%02x: mp4=0x%016llx  ioc=0x%016llx  %s\n",
+                            off, (unsigned long long)vm, (unsigned long long)vi,
+                            (vm != vi) ? "DIFF" : "SAME");
+            }
+        }
+
+        if (fd_mp4 >= 0) close(fd_mp4);
+        if (fd_ioc >= 0) close(fd_ioc);
+
+        /* Возвращаем оригинальный d_open */
         kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, orig_dopen_calc, 0);
     }
 
-    /* ------------------------------------------------------------------------- */
-    /* ШАГ D — Fallback: Fake zeroed page injection                               */
-    /* ------------------------------------------------------------------------- */
-    if (mp4_cdev_addr && dedicated_mp4_csw) {
-        klog_printf("[STEP_D] === STEP D: Fake zeroed page softc injection ===\n");
-        static uint8_t fake_page[4096] __attribute__((aligned(4096)));
-        memset(fake_page, 0, sizeof(fake_page));
+    /* ========================================================================= */
+    /* ТЕСТ 2: DIRECT KERNEL d_open (KEKCALL 36)                                  */
+    /* ========================================================================= */
+    klog_printf("[DIRECT_DOPEN] === TEST 2: Direct kernel d_open call via KEKCALL 36 ===\n");
+    if (mp4_cdev_addr && orig_dopen_calc) {
+        /* 1. Вызов с текущим curthread */
+        long ret_cur = kekcall5(KEKCALL_CALL_DOPEN, orig_dopen_calc, mp4_cdev_addr, O_RDWR, 0 /* curthread */);
+        klog_printf("[DIRECT_DOPEN] curthread: ret=%ld\n", ret_cur);
 
-        uint64_t fake_ptr = (uint64_t)fake_page;
-        uint32_t target_off = discovered_softc_off ? discovered_softc_off : 0x70;
+        /* 2. Вызов с O_RDONLY */
+        long ret_ro = kekcall5(KEKCALL_CALL_DOPEN, orig_dopen_calc, mp4_cdev_addr, O_RDONLY, 0 /* curthread */);
+        klog_printf("[DIRECT_DOPEN] curthread (O_RDONLY): ret=%ld\n", ret_ro);
 
-        uint64_t orig_val = 0;
-        kekcall(KEKCALL_DUMP_MEM, mp4_cdev_addr + target_off, (uintptr_t)&orig_val, 8);
-
-        kekcall(27 /* WRITE64 */, mp4_cdev_addr + target_off, fake_ptr, 0);
-        kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, null_dopen, 0);
-
-        int fd_d = open("/dev/mp4/dump_for_decid", O_RDWR);
-        int ed = errno;
-        klog_printf("[FAKE_SOFTC_INJECT] open fd=%d errno=%d\n", fd_d, ed);
-
-        if (fd_d >= 0) {
-            ssize_t nw = write(fd_d, "\x01\x00\x00\x00", 4);
-            int we = errno;
-            klog_printf("[FAKE_SOFTC_INJECT] write nw=%zd errno=%d\n", nw, we);
-
-            /* Dump нашего fake page ПОСЛЕ write */
-            klog_printf("[FAKE_AFTER_WRITE]:\n");
-            for (int i = 0; i < 128; i += 16) {
-                klog_printf("  +0x%02x: %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
-                            i, fake_page[i], fake_page[i+1], fake_page[i+2], fake_page[i+3],
-                            fake_page[i+4], fake_page[i+5], fake_page[i+6], fake_page[i+7],
-                            fake_page[i+8], fake_page[i+9], fake_page[i+10], fake_page[i+11],
-                            fake_page[i+12], fake_page[i+13], fake_page[i+14], fake_page[i+15]);
-            }
-            close(fd_d);
-        }
-
-        /* Восстановление */
-        kekcall(27 /* WRITE64 */, mp4_cdev_addr + target_off, orig_val, 0);
-        kekcall(27 /* WRITE64 */, dedicated_mp4_csw + 0x10ULL, orig_dopen_calc, 0);
+        /* 3. Вызов с NULL td */
+        long ret_null = kekcall5(KEKCALL_CALL_DOPEN, orig_dopen_calc, mp4_cdev_addr, O_RDWR, 1 /* NULL td */);
+        klog_printf("[DIRECT_DOPEN] NULL td: ret=%ld\n", ret_null);
     }
+
 
 
 
