@@ -3419,6 +3419,36 @@ install_ppr_a53(uint32_t system_fw_version)
                             errno);
                 return -3;
             }
+
+            /* Pre-flight: send one no-op A_11 ping {12,0,0}, verify A_21
+             * echoes with size=0x18 flags=0x10002. If this fails, bail
+             * BEFORE touching any A53 target address. */
+            {
+                uint32_t ping[3] = { 0x0c, 0, 0 };
+                errno = 0;
+                int r = ioctl(actx.fd, 0x800c410b /*A_11*/, ping);
+                int e = errno;
+                klog_printf("[a53] preflight A_11: ret=%d errno=%d\n", r, e);
+                if (r < 0) {
+                    klog_puts("[a53] preflight A_11 failed; abort apply\n");
+                    close(actx.fd);
+                    return -4;
+                }
+                uint8_t rb[24] = {0};
+                errno = 0;
+                r = ioctl(actx.fd, 0x40184115 /*A_21*/, rb);
+                e = errno;
+                uint32_t size_tag;      __builtin_memcpy(&size_tag, rb+0, 4);
+                uint32_t flags_const;   __builtin_memcpy(&flags_const, rb+0xc, 4);
+                klog_printf("[a53] preflight A_21: ret=%d errno=%d size=0x%x flags=0x%x\n",
+                            r, e, size_tag, flags_const);
+                if (r < 0 || size_tag != 0x18 || flags_const != 0x10002) {
+                    klog_puts("[a53] preflight A_21 layout mismatch; abort apply\n");
+                    close(actx.fd);
+                    return -5;
+                }
+                klog_puts("[a53] preflight OK — transport live, proceeding to 34 writes\n");
+            }
         }
 
         int ar = apply_profile(profile, &actx);
