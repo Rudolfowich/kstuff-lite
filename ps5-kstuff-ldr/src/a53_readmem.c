@@ -1529,9 +1529,31 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                 if (jfd >= 0) {
                     klog_printf("[DOPEN_JMP_OPEN] *** SUCCESS *** opened mp4/dump_for_decid with legitimate init!\n");
 
-                    /* ---- MP4_DUMP: try the sibling /dev/mp4/dump (not _for_decid).
-                     * same csw, patched d_open path → should also open now.
-                     * Это и есть реальный SDBGP/DECI5S transport для A53 PPR mailbox. */
+                    /* ---- MP4_DUMP: check if /dev/mp4/dump exists as separate cdev.
+                     * stat() returns ENOENT if doesn't exist. On 13.60 Sony likely
+                     * renamed mp4/dump → mp4/dump_for_decid (our existing jfd target). */
+                    {
+                        struct stat sb_dump = {0};
+                        errno = 0;
+                        int sr = stat("/dev/mp4/dump", &sb_dump);
+                        klog_printf("[MP4_DUMP_STAT] stat('/dev/mp4/dump') ret=%d errno=%d\n", sr, errno);
+                        errno = 0;
+                        int sr2 = stat("/dev/mp4/dump_for_decid", &sb_dump);
+                        klog_printf("[MP4_DUMP_STAT] stat('/dev/mp4/dump_for_decid') ret=%d errno=%d size=%lld\n",
+                                    sr2, errno, (long long)sb_dump.st_size);
+                        /* list /dev/mp4/ contents */
+                        DIR *dp = opendir("/dev/mp4");
+                        if (dp) {
+                            klog_printf("[MP4_DUMP_LS] opendir(/dev/mp4) OK\n");
+                            struct dirent *de;
+                            while ((de = readdir(dp)) != NULL) {
+                                klog_printf("[MP4_DUMP_LS]   '%s'\n", de->d_name);
+                            }
+                            closedir(dp);
+                        } else {
+                            klog_printf("[MP4_DUMP_LS] opendir failed errno=%d\n", errno);
+                        }
+                    }
                     errno = 0;
                     int md_fd = open("/dev/mp4/dump", O_RDWR);
                     int md_err = errno;
