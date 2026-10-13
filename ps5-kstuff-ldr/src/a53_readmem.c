@@ -1243,6 +1243,82 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                         cdev_buf[i+8], cdev_buf[i+9], cdev_buf[i+10], cdev_buf[i+11],
                         cdev_buf[i+12], cdev_buf[i+13], cdev_buf[i+14], cdev_buf[i+15]);
         }
+
+        /* --------------------------------------------------------------------- */
+        /* БОНУС: Тест si_cred mp4 cdev (cdev + 0xa8) через KEKCALL 30           */
+        /* --------------------------------------------------------------------- */
+        uint64_t si_cred = *(uint64_t*)(cdev_buf + 0xa8);
+        klog_printf("[SI_CRED_TEST] cdev+0xa8 = 0x%llx\n", (unsigned long long)si_cred);
+        if (si_cred && (si_cred >> 48) == 0xffff) {
+            uint64_t swap_res[4] = {0};
+            long r_sw = kekcall(KEKCALL_SWAP_BY_UCRED, si_cred, (uintptr_t)swap_res, 0);
+            klog_printf("[SI_CRED_TEST] KEKCALL_SWAP_BY_UCRED ret=%ld\n", r_sw);
+
+            errno = 0;
+            int fd_sicred = open("/dev/mp4/dump_for_decid", O_RDWR);
+            int e_sicred = errno;
+            klog_printf("[SI_CRED_OPEN] open with si_cred: fd=%d (errno=%d)\n", fd_sicred, e_sicred);
+            if (fd_sicred >= 0) close(fd_sicred);
+
+            /* Восстанавливаем ucred обратно */
+            kekcall(17 /* RESTORE_FULL */, (uintptr_t)swap_res, 0, 0);
+        }
+    }
+
+    /* ------------------------------------------------------------------------- */
+    /* ДЕКОДИРОВАНИЕ TRAMPOLINE И ДАМП РЕАЛЬНОГО .text ДЛЯ d_write, d_ioctl, etc */
+    /* ------------------------------------------------------------------------- */
+    if (dedicated_mp4_csw) {
+        struct {
+            const char *name;
+            uint32_t csw_off;
+            uint32_t dump_size;
+        } ops[] = {
+            { "d_write", 0x30, 0x600 },
+            { "d_ioctl", 0x38, 0x600 },
+            { "d_read",  0x28, 0x400 },
+            { "d_mmap",  0x48, 0x400 },
+            { "d_open",  0x10, 0x400 }
+        };
+
+        for (int op = 0; op < 5; op++) {
+            uint64_t tramp = 0;
+            kekcall(KEKCALL_DUMP_MEM, dedicated_mp4_csw + ops[op].csw_off, (uintptr_t)&tramp, 8);
+            klog_printf("[TRAMP] %s @ csw+0x%02x: 0x%llx\n", ops[op].name, ops[op].csw_off, (unsigned long long)tramp);
+
+            if (!tramp || (tramp >> 48) != 0xffff) continue;
+
+            uint8_t tb[16] = {0};
+            kekcall(KEKCALL_DUMP_MEM, tramp, (uintptr_t)tb, 16);
+            klog_printf("[TRAMP_BYTES] %s: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                        ops[op].name, tb[0], tb[1], tb[2], tb[3], tb[4], tb[5], tb[6], tb[7]);
+
+            uint64_t target = tramp;
+            if (tb[0] == 0xe9) {
+                int32_t rel32 = (int32_t)(tb[1] | (tb[2] << 8) | (tb[3] << 16) | (tb[4] << 24));
+                target = tramp + 5 + rel32;
+                klog_printf("[TRAMP_RESOLVE] %s: 0x%llx + 5 + (%d) = 0x%llx\n",
+                            ops[op].name, (unsigned long long)tramp, (int)rel32, (unsigned long long)target);
+            }
+
+            /* Дамп тела функции */
+            uint32_t sz = ops[op].dump_size;
+            if (sz > 0x600) sz = 0x600;
+            uint8_t func_buf[0x600];
+            memset(func_buf, 0, sz);
+            long r_fn = kekcall(KEKCALL_DUMP_MEM, target, (uintptr_t)func_buf, sz);
+            klog_printf("[FUNC_DUMP] === %s @ 0x%llx (size=0x%x, ret=%ld) ===\n",
+                        ops[op].name, (unsigned long long)target, sz, r_fn);
+
+            for (uint32_t b = 0; b < sz; b += 16) {
+                klog_printf("[%s+0x%03x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                            ops[op].name, b,
+                            func_buf[b+0], func_buf[b+1], func_buf[b+2], func_buf[b+3],
+                            func_buf[b+4], func_buf[b+5], func_buf[b+6], func_buf[b+7],
+                            func_buf[b+8], func_buf[b+9], func_buf[b+10], func_buf[b+11],
+                            func_buf[b+12], func_buf[b+13], func_buf[b+14], func_buf[b+15]);
+            }
+        }
     }
 
     /* ========================================================================= */
