@@ -3413,6 +3413,52 @@ install_ppr_a53(uint32_t system_fw_version)
         actx.fd = -1;
 
         if (!A53_DRY_RUN) {
+            /* Apply DAC bypass patches inline via kekcall write64 before any
+             * ioctl / open attempt. Offsets verified on 13.60:
+             *   d_open  at kbase - 0x8dcf0, byte +0x1f: 0x74 (je) -> 0x75 (jne)
+             *   d_ioctl at kbase - 0x8dbd0, byte +0x33: 0x74 (je) -> 0x75 (jne)
+             */
+            uint64_t kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+            klog_printf("[a53] dac patch: kbase=0x%llx\n",
+                        (unsigned long long)kbase);
+            if (kbase > 0xffffffff00000000ULL) {
+                uint64_t daddr_open  = (kbase - 0x8dcf0ULL) + 0x18ULL;
+                uint64_t daddr_ioctl = (kbase - 0x8dbd0ULL) + 0x30ULL;
+                uint64_t qw;
+                /* d_open byte +0x1f = byte 7 of qword at +0x18 */
+                qw = 0;
+                kekcall(KEKCALL_DUMP_MEM, daddr_open, (uintptr_t)&qw, 8);
+                uint8_t cur_open = (uint8_t)(qw >> 56);
+                klog_printf("[a53] dac d_open byte: 0x%02x\n", cur_open);
+                if (cur_open == 0x74) {
+                    uint64_t nq = (qw & ~(0xffULL << 56)) | (0x75ULL << 56);
+                    kekcall(27 /*WRITE64*/, daddr_open, nq, 0);
+                    klog_puts("[a53] dac d_open patched 0x74 -> 0x75\n");
+                } else if (cur_open == 0x75) {
+                    klog_puts("[a53] dac d_open already patched\n");
+                } else {
+                    klog_printf("[a53] dac d_open UNEXPECTED byte 0x%02x; abort\n",
+                                cur_open);
+                    return -6;
+                }
+                /* d_ioctl byte +0x33 = byte 3 of qword at +0x30 */
+                qw = 0;
+                kekcall(KEKCALL_DUMP_MEM, daddr_ioctl, (uintptr_t)&qw, 8);
+                uint8_t cur_ioctl = (uint8_t)(qw >> 24);
+                klog_printf("[a53] dac d_ioctl byte: 0x%02x\n", cur_ioctl);
+                if (cur_ioctl == 0x74) {
+                    uint64_t nq = (qw & ~(0xffULL << 24)) | (0x75ULL << 24);
+                    kekcall(27 /*WRITE64*/, daddr_ioctl, nq, 0);
+                    klog_puts("[a53] dac d_ioctl patched 0x74 -> 0x75\n");
+                } else if (cur_ioctl == 0x75) {
+                    klog_puts("[a53] dac d_ioctl already patched\n");
+                } else {
+                    klog_printf("[a53] dac d_ioctl UNEXPECTED byte 0x%02x; abort\n",
+                                cur_ioctl);
+                    return -7;
+                }
+            }
+
             actx.fd = open("/dev/mp4/dump", O_RDWR);
             if (actx.fd < 0) {
                 klog_printf("[a53] open(/dev/mp4/dump) failed errno=%d; abort apply\n",
