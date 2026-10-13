@@ -1429,6 +1429,40 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = cur_val;
         return 0;
     }
+    else if(nr == 40)
+    {
+        /* WRITE_PHYS: write to physical memory via DMEM mapping (bypasses WP).
+         * args[RDI] = kernel virtual address (KVA, we va2phys inside)
+         *             OR direct physical address if top bit NOT set (phys < 1<<48)
+         * args[RSI] = value (u64 or u32 depending on width)
+         * args[RDX] = width (4 or 8), default 8
+         * return 0 on success, EFAULT if VA unmapped, EINVAL if bad width
+         */
+        uint64_t addr = args[RDI];
+        uint64_t val  = args[RSI];
+        uint32_t width = (uint32_t)args[RDX];
+        if (width == 0) width = 8;
+        if (width != 4 && width != 8) return EINVAL;
+
+        /* If addr is a kernel VA (top bits = 0xffff), translate via page walk.
+         * Otherwise treat as physical address. */
+        uint64_t phys = addr;
+        if ((addr >> 48) == 0xffff) {
+            uint64_t limit = 0;
+            if (!virt2phys(addr, &phys, &limit))
+                return EFAULT;
+        }
+
+        /* Write via DMEM aperture — bypasses WP bit. */
+        if (width == 4) {
+            *(volatile uint32_t*)(DMEM + phys) = (uint32_t)val;
+        } else {
+            *(volatile uint64_t*)(DMEM + phys) = val;
+        }
+
+        args[RAX] = 0;
+        return 0;
+    }
     else if(nr == 0xffffffff)
     {
         args[RAX] = 0;
