@@ -596,18 +596,63 @@ probe_opened_mp4_fd(int fd, const char *name)
         }
 
         /* --------------------------------------------------------------------- */
-        /* ШАГ B: Открыть cdev с реальным cdevpriv (/dev/dmem0, /dev/notification0 и др.) */
+        /* 3 ЦЕЛЕВЫХ ГЛУБОКИХ ДАМПА:                                              */
+        /* 1) fp+0x40 (cdev_privdata?)                                           */
+        /* 2) fp+0x18 (vnode/rdev?)                                              */
+        /* 3) fp+0x20 (secondary fdt / list?)                                    */
+        /* --------------------------------------------------------------------- */
+        uint64_t ptr_40 = 0, ptr_18 = 0, ptr_20 = 0;
+        kekcall(KEKCALL_DUMP_MEM, fp_live + 0x40ULL, (uintptr_t)&ptr_40, 8);
+        kekcall(KEKCALL_DUMP_MEM, fp_live + 0x18ULL, (uintptr_t)&ptr_18, 8);
+        kekcall(KEKCALL_DUMP_MEM, fp_live + 0x20ULL, (uintptr_t)&ptr_20, 8);
+
+        klog_printf("[DEEP_1] === Dump fp+0x40 (ptr=0x%llx, 0x80 bytes) ===\n", (unsigned long long)ptr_40);
+        if (ptr_40 && (ptr_40 >> 48) == 0xffff) {
+            for (int i = 0; i < 16; i++) {
+                uint64_t v = 0;
+                kekcall(KEKCALL_DUMP_MEM, ptr_40 + (uint64_t)i * 8, (uintptr_t)&v, 8);
+                klog_printf("[PTR40+0x%02x] = 0x%016llx\n", i * 8, (unsigned long long)v);
+            }
+        }
+
+        klog_printf("[DEEP_2] === Dump fp+0x18 (ptr=0x%llx, 0x80 bytes) ===\n", (unsigned long long)ptr_18);
+        if (ptr_18 && (ptr_18 >> 48) == 0xffff) {
+            for (int i = 0; i < 16; i++) {
+                uint64_t v = 0;
+                kekcall(KEKCALL_DUMP_MEM, ptr_18 + (uint64_t)i * 8, (uintptr_t)&v, 8);
+                klog_printf("[PTR18+0x%02x] = 0x%016llx\n", i * 8, (unsigned long long)v);
+            }
+        }
+
+        klog_printf("[DEEP_3] === Dump fp+0x20 (ptr=0x%llx, 0x40 bytes) ===\n", (unsigned long long)ptr_20);
+        if (ptr_20 && (ptr_20 >> 48) == 0xffff) {
+            for (int i = 0; i < 8; i++) {
+                uint64_t v = 0;
+                kekcall(KEKCALL_DUMP_MEM, ptr_20 + (uint64_t)i * 8, (uintptr_t)&v, 8);
+                klog_printf("[PTR20+0x%02x] = 0x%016llx\n", i * 8, (unsigned long long)v);
+            }
+        }
+
+        /* --------------------------------------------------------------------- */
+        /* ШАГ B: Открыть эталонные cdev (/dev/dmem1, /dev/dce, /dev/notification0) */
         /* --------------------------------------------------------------------- */
         const char *cand_cdevs[] = {
-            "/dev/notification0", "/dev/dmem0", "/dev/dce", "/dev/da0", "/dev/hid0"
+            "/dev/dmem1", "/dev/dce", "/dev/notification0", "/dev/dmem0", "/dev/da0"
         };
         int fd_priv_cand = -1;
         uint64_t fp_cand_priv = 0;
         const char *found_cand_name = "none";
 
         for (int c = 0; c < 5; c++) {
+            errno = 0;
             int c_fd = open(cand_cdevs[c], O_RDWR);
-            if (c_fd < 0) c_fd = open(cand_cdevs[c], O_RDONLY);
+            if (c_fd < 0) {
+                errno = 0;
+                c_fd = open(cand_cdevs[c], O_RDONLY);
+            }
+            int err = errno;
+            klog_printf("[REF_TRY] '%s' -> fd=%d (errno=%d)\n", cand_cdevs[c], c_fd, err);
+
             if (c_fd >= 0) {
                 uint64_t c_info[40] = {0};
                 kekcall(KEKCALL_GET_FD_INFO, (uint64_t)c_fd, 1ULL, (uintptr_t)c_info);
@@ -616,7 +661,7 @@ probe_opened_mp4_fd(int fd, const char *name)
                     fd_priv_cand = c_fd;
                     fp_cand_priv = c_fp;
                     found_cand_name = cand_cdevs[c];
-                    klog_printf("[STEP_B] Opened %s (fd=%d) -> fp_cand=0x%llx\n",
+                    klog_printf("[STEP_B] SUCCESS: Opened %s (fd=%d) -> fp_cand=0x%llx\n",
                                 found_cand_name, fd_priv_cand, (unsigned long long)fp_cand_priv);
                     break;
                 }
@@ -631,6 +676,18 @@ probe_opened_mp4_fd(int fd, const char *name)
                 uint64_t val = 0;
                 kekcall(KEKCALL_DUMP_MEM, fp_cand_priv + (uint64_t)i * 8, (uintptr_t)&val, 8);
                 klog_printf("[FP_CAND+0x%02x] = 0x%016llx\n", i * 8, (unsigned long long)val);
+            }
+
+            /* Дамп его fp+0x40 для прямого сравнения */
+            uint64_t cand_ptr40 = 0;
+            kekcall(KEKCALL_DUMP_MEM, fp_cand_priv + 0x40ULL, (uintptr_t)&cand_ptr40, 8);
+            klog_printf("[DUMP_CAND_40] %s fp+0x40 = 0x%llx\n", found_cand_name, (unsigned long long)cand_ptr40);
+            if (cand_ptr40 && (cand_ptr40 >> 48) == 0xffff) {
+                for (int i = 0; i < 8; i++) {
+                    uint64_t cv = 0;
+                    kekcall(KEKCALL_DUMP_MEM, cand_ptr40 + (uint64_t)i * 8, (uintptr_t)&cv, 8);
+                    klog_printf("[CAND_PTR40+0x%02x] = 0x%016llx\n", i * 8, (unsigned long long)cv);
+                }
             }
 
             /* Diff против cdevpriv дескриптора */
