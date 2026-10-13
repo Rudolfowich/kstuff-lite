@@ -1107,52 +1107,70 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         int fd_ioc = open("/dev/deci_mp4_ioc", O_RDWR);
         klog_printf("[FILE_TEST] opened fds: fd_mp4=%d fd_ioc=%d\n", fd_mp4, fd_ioc);
 
+        /* Достаем надежный адрес my_td и curproc */
+        uint64_t ext_c[4] = {0};
+        kekcall(KEKCALL_EXT_DUMP, 0, (uintptr_t)ext_c, sizeof(ext_c));
+        uint64_t my_td = ext_c[1];
+        uint64_t my_curproc = 0;
+        if (my_td) kekcall(KEKCALL_DUMP_MEM, my_td + 0x08ULL, (uintptr_t)&my_curproc, 8);
+
+        klog_printf("[FILE_TEST] my_td=0x%llx my_curproc=0x%llx\n",
+                    (unsigned long long)my_td, (unsigned long long)my_curproc);
+
         /* Ищем p_fd в curproc (+0x38..+0x60) */
         uint64_t p_fd = 0;
         uint32_t p_fd_off = 0;
-        if (scanned_proc) {
+        if (my_curproc) {
             for (uint32_t po = 0x38; po <= 0x60; po += 8) {
                 uint64_t ptr = 0;
-                kekcall(KEKCALL_DUMP_MEM, scanned_proc + po, (uintptr_t)&ptr, 8);
+                kekcall(KEKCALL_DUMP_MEM, my_curproc + po, (uintptr_t)&ptr, 8);
                 if ((ptr >> 48) == 0xffff) {
-                    /* Проверяем: по ptr+0x00 или ptr+0x08 должен лежать массив ofiles */
-                    uint64_t fdt = 0;
-                    kekcall(KEKCALL_DUMP_MEM, ptr, (uintptr_t)&fdt, 8);
-                    if ((fdt >> 48) == 0xffff || fdt != 0) {
+                    /* Читаем заголовок filedesc: первые 32 байта */
+                    uint64_t fdt_hdr[4] = {0};
+                    kekcall(KEKCALL_DUMP_MEM, ptr, (uintptr_t)fdt_hdr, sizeof(fdt_hdr));
+                    /* fdt_files / fdt_ofiles - указатель на массив */
+                    if ((fdt_hdr[0] >> 48) == 0xffff || (fdt_hdr[1] >> 48) == 0xffff) {
                         p_fd = ptr;
                         p_fd_off = po;
+                        klog_printf("[FILE_TEST] p_fd candidate at +0x%x: [0]=0x%llx [1]=0x%llx\n",
+                                    po, (unsigned long long)fdt_hdr[0], (unsigned long long)fdt_hdr[1]);
                         break;
                     }
                 }
             }
         }
-        klog_printf("[FILE_TEST] found p_fd=0x%llx at proc+0x%x\n",
+        klog_printf("[FILE_TEST] selected p_fd=0x%llx at proc+0x%x\n",
                     (unsigned long long)p_fd, p_fd_off);
 
-        /* Во FreeBSD 12: struct filedesc содержит struct fdescenttable *fd_files (+0x08)
-         * или массив fd_ofiles прямо внутри */
         uint64_t fp_mp4 = 0, fp_ioc = 0;
         if (p_fd && fd_mp4 >= 0) {
-            /* Сканируем первые 256 байт p_fd в поисках указателей на struct file */
-            uint64_t fd_dump[32] = {0};
-            kekcall(KEKCALL_DUMP_MEM, p_fd, (uintptr_t)fd_dump, sizeof(fd_dump));
-            for (int i = 0; i < 32; i++) {
-                uint64_t cand_tbl = fd_dump[i];
-                if ((cand_tbl >> 48) == 0xffff) {
-                    /* Проверяем таблицу fdescent (элементы по 16 или 32 байта) */
-                    uint64_t fde[32] = {0};
-                    kekcall(KEKCALL_DUMP_MEM, cand_tbl, (uintptr_t)fde, sizeof(fde));
-                    /* Ищем fde_file на смещении fd_mp4 * stride */
-                    if (fd_mp4 < 16 && (fde[fd_mp4 * 2] >> 48) == 0xffff) {
-                        fp_mp4 = fde[fd_mp4 * 2];
-                        if (fd_ioc >= 0 && fd_ioc < 16) fp_ioc = fde[fd_ioc * 2];
-                        klog_printf("[FILE_TEST] found table via p_fd+0x%x: fp_mp4=0x%llx fp_ioc=0x%llx\n",
-                                    i * 8, (unsigned long long)fp_mp4, (unsigned long long)fp_ioc);
-                        break;
-                    }
-                }
+            /* Во FreeBSD 12 fdt_files лежит на +0x00 или +0x08 */
+            uint64_t fdt_ptr = 0;
+            kekcall(KEKCALL_DUMP_MEM, p_fd, (uintptr_t)&fdt_ptr, 8);
+            if ((fdt_ptr >> 48) != 0xffff) {
+                kekcall(KEKCALL_DUMP_MEM, p_fd + 0x08ULL, (uintptr_t)&fdt_ptr, 8);
+            }
+
+            /* Если fdt_ptr это fdescent table (stride 16 байт) */
+            if ((fdt_ptr >> 48) == 0xffff) {
+                uint64_t fde[32] = {0};
+                kekcall(KEKCALL_DUMP_MEM, fdt_ptr, (uintptr_t)fde, sizeof(fde));
+                fp_mp4 = fde[fd_mp4 * 2];
+                if (fd_ioc >= 0) fp_ioc = fde[fd_ioc * 2];
+                klog_printf("[FILE_TEST] via fdt_ptr=0x%llx: fp_mp4=0x%llx fp_ioc=0x%llx\n",
+                            (unsigned long long)fdt_ptr, (unsigned long long)fp_mp4, (unsigned long long)fp_ioc);
+            }
+            if (!fp_mp4) {
+                /* Попробуем прямой массив в p_fd */
+                uint64_t fde[32] = {0};
+                kekcall(KEKCALL_DUMP_MEM, p_fd, (uintptr_t)fde, sizeof(fde));
+                fp_mp4 = fde[fd_mp4];
+                if (fd_ioc >= 0) fp_ioc = fde[fd_ioc];
+                klog_printf("[FILE_TEST] via direct p_fd: fp_mp4=0x%llx fp_ioc=0x%llx\n",
+                            (unsigned long long)fp_mp4, (unsigned long long)fp_ioc);
             }
         }
+
 
         /* Дамп и diff 256 байт struct file */
         if (fp_mp4) {
