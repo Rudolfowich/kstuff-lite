@@ -702,12 +702,32 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
     }
     else if(nr == 25)
     {
-        /* SAFE_PEEK: probe kernel address with kpeek64_checked */
-        uint64_t kaddr = args[RDI];
-        uint64_t user_out = args[RSI];
-        uint64_t val = 0;
-        if (kpeek64_checked(kaddr, &val) != 0) return EFAULT;
-        if (user_out && copy_to_kernel(user_out, &val, 8) != 0) return EFAULT;
+        /* SAFE_PEEK: probe and read kernel memory via page table walk (virt2phys + DMEM).
+         * args[RDI] = kaddr (kernel virtual address)
+         * args[RSI] = user_dst (destination buffer in userland)
+         * args[RDX] = len (length in bytes, default/max 4096)
+         * return: 0 on success, EFAULT if any page is unmapped
+         */
+        uint64_t src = args[RDI];
+        uint64_t dst = args[RSI];
+        uint64_t len = args[RDX];
+        if (!src || !dst) return EINVAL;
+        if (len == 0) len = 8;
+        if (len > 4096) len = 4096;
+
+        /* Critical: check page mapping for every 4KB page in the range before touching */
+        for (uint64_t p = (src & ~0xfffULL); p < src + len; p += 0x1000) {
+            uint64_t phys = 0, limit = 0;
+            if (!virt2phys(p, &phys, &limit)) {
+                return EFAULT; /* Unmapped page — do NOT touch */
+            }
+        }
+
+        /* All pages are verified mapped: copy directly into user buffer */
+        if (copy_from_kernel_raw((void*)dst, src, len) != 0) {
+            return EFAULT;
+        }
+
         args[RAX] = 0;
         return 0;
     }
