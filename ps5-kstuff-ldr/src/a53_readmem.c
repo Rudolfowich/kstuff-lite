@@ -1256,6 +1256,124 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                     (unsigned long long)si_cred);
     }
 
+    /* ========================================================================= */
+    /* DOPEN_HEX: SAFE_PEEK 0x400 реального d_open для mp4/dump_for_decid        */
+    /* ПЕРЕД любым STEP4-патчем csw. Трамплайн уже восстановлен на строке ~1169, */
+    /* csw+0x10 держит orig_dopen → резольвим jmp rel32 → читаем 1024 байта     */
+    /* тела через SAFE_PEEK (обход XOM благодаря Byepervisor).                   */
+    /* ========================================================================= */
+    if (dedicated_mp4_csw) {
+        uint64_t orig_dopen = 0;
+        kekcall(KEKCALL_DUMP_MEM, dedicated_mp4_csw + 0x10ULL, (uintptr_t)&orig_dopen, 8);
+        klog_printf("[DOPEN_HEX] mp4/dump_for_decid csw+0x10 (d_open) = 0x%llx\n",
+                    (unsigned long long)orig_dopen);
+
+        uint64_t real_dopen = orig_dopen;
+        if (orig_dopen && (orig_dopen >> 48) == 0xffff) {
+            uint8_t tramp[16] = {0};
+            long tr = kekcall(KEKCALL_SAFE_PEEK, orig_dopen, (uintptr_t)tramp, 16);
+            klog_printf("[DOPEN_HEX] trampoline peek ret=%ld bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                        tr, tramp[0], tramp[1], tramp[2], tramp[3],
+                        tramp[4], tramp[5], tramp[6], tramp[7]);
+            if (tr == 0 && tramp[0] == 0xe9) {
+                int32_t rel32 = (int32_t)(tramp[1] | (tramp[2]<<8) | (tramp[3]<<16) | (tramp[4]<<24));
+                real_dopen = orig_dopen + 5 + (int64_t)rel32;
+                klog_printf("[DOPEN_HEX] decoded jmp rel32=0x%08x → real d_open = 0x%llx\n",
+                            (uint32_t)rel32, (unsigned long long)real_dopen);
+            } else {
+                klog_printf("[DOPEN_HEX] no e9 trampoline — treating orig as real body\n");
+            }
+        }
+
+        if (real_dopen && (real_dopen >> 48) == 0xffff) {
+            uint8_t body[1024] = {0};
+            long pr = kekcall(KEKCALL_SAFE_PEEK, real_dopen, (uintptr_t)body, sizeof(body));
+            klog_printf("[DOPEN_HEX] === real d_open @ 0x%llx (0x400 bytes, peek_ret=%ld) ===\n",
+                        (unsigned long long)real_dopen, pr);
+            for (int l = 0; l < 64; l++) {
+                klog_printf("[DOPEN+0x%03x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                            l * 16,
+                            body[l*16+0], body[l*16+1], body[l*16+2], body[l*16+3],
+                            body[l*16+4], body[l*16+5], body[l*16+6], body[l*16+7],
+                            body[l*16+8], body[l*16+9], body[l*16+10], body[l*16+11],
+                            body[l*16+12], body[l*16+13], body[l*16+14], body[l*16+15]);
+            }
+        }
+    }
+
+    /* ========================================================================= */
+    /* AUTH_MUTATE_TEST: подменяем ucred на 3 целевых кандидата и пробуем        */
+    /* open("/dev/mp4/dump_for_decid") без STEP4-патча. Логируем fd+errno для    */
+    /* каждого authid, затем RESTORE_FULL. Низ 16 бит authid определяет роль:    */
+    /*   0x1005 — SceVideoCore2K, 0x1004 — SceMediaCoreServer, 0x0022 — mini-sc.*/
+    /* ========================================================================= */
+    {
+        klog_printf("[AUTH_MUTATE_TEST] === Trying open as 3 target authids ===\n");
+        const struct { uint16_t low16; const char *tag; } targets[] = {
+            { 0x1005, "SceVideoCore2K"    },
+            { 0x1004, "SceMediaCoreServer" },
+            { 0x0022, "mini-syscore"      },
+        };
+        for (int t = 0; t < 3; t++) {
+            uint64_t target_ucred = 0;
+            uint32_t target_pid = 0;
+            const char *target_comm = NULL;
+            for (int c = 0; c < 32; c++) {
+                if (!g_cand_authids[c]) continue;
+                if ((uint16_t)(g_cand_authids[c] & 0xFFFF) == targets[t].low16) {
+                    target_ucred = g_cand_ucreds[c];
+                    target_pid   = g_cand_pids[c];
+                    target_comm  = g_cand_comms[c];
+                    break;
+                }
+            }
+            if (!target_ucred) {
+                klog_printf("[MUT_%d] %s (0x%04x) — no candidate found, skip\n",
+                            t, targets[t].tag, targets[t].low16);
+                continue;
+            }
+
+            klog_printf("[MUT_%d] trying %s pid=%u ucred=0x%llx (comm='%s', authid_low=0x%04x)\n",
+                        t, targets[t].tag, target_pid,
+                        (unsigned long long)target_ucred,
+                        target_comm ? target_comm : "?",
+                        targets[t].low16);
+
+            uint64_t bkp[4] = {0};
+            long sr = kekcall(KEKCALL_SWAP_BY_UCRED, target_ucred, (uintptr_t)bkp, 0);
+            klog_printf("[MUT_%d_SWAP] ret=%ld old_td=0x%llx old_p=0x%llx new_td=0x%llx new_p=0x%llx\n",
+                        t, sr,
+                        (unsigned long long)bkp[0], (unsigned long long)bkp[1],
+                        (unsigned long long)bkp[2], (unsigned long long)bkp[3]);
+            if (sr != 0) {
+                klog_printf("[MUT_%d] swap failed, skip open\n", t);
+                continue;
+            }
+
+            errno = 0;
+            int mfd = open("/dev/mp4/dump_for_decid", O_RDWR);
+            int me = errno;
+            klog_printf("[MUT_%d_OPEN] %s O_RDWR fd=%d errno=%d\n",
+                        t, targets[t].tag, mfd, me);
+            if (mfd < 0) {
+                errno = 0;
+                mfd = open("/dev/mp4/dump_for_decid", O_RDONLY);
+                me = errno;
+                klog_printf("[MUT_%d_OPEN] %s O_RDONLY fd=%d errno=%d\n",
+                            t, targets[t].tag, mfd, me);
+            }
+            if (mfd >= 0) {
+                klog_printf("[MUT_%d_OPEN] *** SUCCESS *** %s unlocked mp4/dump_for_decid!\n",
+                            t, targets[t].tag);
+                close(mfd);
+            }
+
+            kekcall(KEKCALL_RESTORE_FULL, 0, (uintptr_t)bkp, 0);
+            klog_printf("[MUT_%d_RESTORE] done\n", t);
+        }
+        klog_printf("[AUTH_MUTATE_TEST] === END ===\n");
+    }
+
     /* ------------------------------------------------------------------------- */
     /* ДЕКОДИРОВАНИЕ TRAMPOLINE И ДАМП РЕАЛЬНОГО .text ДЛЯ d_write, d_ioctl, etc */
     /* ------------------------------------------------------------------------- */
@@ -1804,8 +1922,16 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         }
 
         if (fd >= 0) {
-            klog_printf("[PROBE_NODE] *** SUCCESS! Opened '%s' with fd=%d! Starting deep probe... ***\n", path, fd);
-            probe_opened_mp4_fd(fd, path);
+            klog_printf("[PROBE_NODE] *** SUCCESS! Opened '%s' with fd=%d! ***\n", path, fd);
+            /* Deci-устройства (deci_mp4_mmc, deci_mp4_ioc, deci_coredump) блокируют
+             * ioctl/read, ждут хост-сторону через DECI connection — deep probe по
+             * ним висит минутами. Запускаем deep probe ТОЛЬКО для mp4/dump_for_decid. */
+            if (strstr(path, "mp4/dump_for_decid")) {
+                klog_printf("[PROBE_NODE] deep probe on '%s'...\n", path);
+                probe_opened_mp4_fd(fd, path);
+            } else {
+                klog_printf("[PROBE_NODE] skipping deep probe for deci-blocking device '%s'\n", path);
+            }
             close(fd);
         }
     }
