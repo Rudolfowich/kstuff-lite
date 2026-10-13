@@ -1650,14 +1650,15 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                         md_fd = open("/dev/mp4/dump", 0x100000);  // O_PATH-ish
                         klog_printf("[MP4_DUMP_OPEN] O_PATH-ish fd=%d errno=%d\n", md_fd, errno);
                     }
-                    if (md_fd < 0) {
-                        /* First open failed — mp4/dump has a DIFFERENT cdevsw than
-                         * mp4/dump_for_decid. Find and patch IT separately.
-                         * Offset: kbase + 0x1f2ddb0 (found offline in kdump near
-                         * make_dev("mp4/dump", ...) call site at kbase - 0x9b0f0). */
-                        uint64_t md_kbase = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
-                        if (md_kbase > 0xffffffff00000000ULL) {
-                            uint64_t md_csw = md_kbase + 0x1f2ddb0ULL;
+                    if (md_fd < 0 && g_cdev_mp4_dump) {
+                        /* mp4/dump has own csw. Read it from cdev+0x58 (si_devsw). */
+                        uint64_t md_csw = 0;
+                        kekcall(KEKCALL_DUMP_MEM, g_cdev_mp4_dump + 0x58ULL,
+                                (uintptr_t)&md_csw, 8);
+                        klog_printf("[MP4_DUMP_CSW] from cdev+0x58: 0x%llx\n",
+                                    (unsigned long long)md_csw);
+                        if (!md_csw) goto skip_md_patch;
+                        {
                             klog_printf("[MP4_DUMP_CSW] expected csw @ 0x%llx (kbase+0x1f2ddb0)\n",
                                         (unsigned long long)md_csw);
                             /* Dump 32 bytes of cdevsw to verify + get d_open at +0x10 */
@@ -1723,6 +1724,7 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                                 }
                             }
                         }
+skip_md_patch: ;
                     }
                     if (md_fd >= 0) {
                         klog_printf("[MP4_DUMP_OPEN] *** SUCCESS *** /dev/mp4/dump opened (fd=%d)\n", md_fd);
