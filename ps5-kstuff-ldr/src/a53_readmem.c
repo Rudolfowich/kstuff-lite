@@ -1112,58 +1112,45 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         uint64_t p_fd = 0;
 
         if (my_curproc) {
-            kekcall(KEKCALL_DUMP_MEM, my_curproc + 0x48ULL, (uintptr_t)&p_fd, 8);
+            kekcall(KEKCALL_DUMP_MEM, my_curproc + 0x00ULL, (uintptr_t)&p_fd, 8);
         }
-        klog_printf("[P_FD_EXACT] proc+0x48 -> p_fd=0x%llx\n", (unsigned long long)p_fd);
+        klog_printf("[P_FD] proc+0x0 -> p_fd=0x%llx\n", (unsigned long long)p_fd);
 
         uint64_t fp_mp4 = 0, fp_ioc = 0;
         if (p_fd && (p_fd >> 48) == 0xffff && fd_mp4 >= 0) {
-            /* Читаем заголовок struct filedesc (первые 64 байта) */
-            uint64_t fd_hdr[8] = {0};
-            kekcall(KEKCALL_DUMP_MEM, p_fd, (uintptr_t)fd_hdr, sizeof(fd_hdr));
-            for (int i = 0; i < 8; i++) {
-                klog_printf("[FILEDESC+0x%02x] = 0x%016llx\n", i * 8, (unsigned long long)fd_hdr[i]);
-            }
-
-            /* fdt_ofiles обычно лежит на +0x00 или +0x08 */
-            uint64_t fd_ofiles = ((fd_hdr[1] >> 48) == 0xffff) ? fd_hdr[1] : fd_hdr[0];
-            klog_printf("[FILE_TEST] selected fd_ofiles=0x%llx\n", (unsigned long long)fd_ofiles);
+            uint64_t fd_ofiles = 0;
+            kekcall(KEKCALL_DUMP_MEM, p_fd + 0x08ULL, (uintptr_t)&fd_ofiles, 8);
+            klog_printf("[FDT] fd_ofiles=0x%llx\n", (unsigned long long)fd_ofiles);
 
             if ((fd_ofiles >> 48) == 0xffff) {
-                /* Во FreeBSD / PS5 массив fdescent: пробуем strides 0x20, 0x18, 0x10, 0x08 */
-                uint64_t candidates_mp4[4] = {0};
-                kekcall(KEKCALL_DUMP_MEM, fd_ofiles + (uint64_t)fd_mp4 * 0x20ULL, (uintptr_t)&candidates_mp4[0], 8);
-                kekcall(KEKCALL_DUMP_MEM, fd_ofiles + (uint64_t)fd_mp4 * 0x18ULL, (uintptr_t)&candidates_mp4[1], 8);
-                kekcall(KEKCALL_DUMP_MEM, fd_ofiles + (uint64_t)fd_mp4 * 0x10ULL, (uintptr_t)&candidates_mp4[2], 8);
-                kekcall(KEKCALL_DUMP_MEM, fd_ofiles + (uint64_t)fd_mp4 * 0x08ULL, (uintptr_t)&candidates_mp4[3], 8);
+                uint8_t fdbuf[0x400] = {0};
+                kekcall(KEKCALL_DUMP_MEM, fd_ofiles, (uintptr_t)fdbuf, 0x400);
 
-                klog_printf("[FILE_TEST] stride probes mp4(fd=%d): 0x20:0x%llx 0x18:0x%llx 0x10:0x%llx 0x08:0x%llx\n",
-                            fd_mp4,
-                            (unsigned long long)candidates_mp4[0],
-                            (unsigned long long)candidates_mp4[1],
-                            (unsigned long long)candidates_mp4[2],
-                            (unsigned long long)candidates_mp4[3]);
+                int nfiles = *(int*)(fdbuf + 0x00);
+                klog_printf("[FDT] nfiles=%d\n", nfiles);
 
-                uint32_t chosen_stride = 0x20;
-                if ((candidates_mp4[0] >> 48) == 0xffff) {
-                    fp_mp4 = candidates_mp4[0];
-                    chosen_stride = 0x20;
-                } else if ((candidates_mp4[1] >> 48) == 0xffff) {
-                    fp_mp4 = candidates_mp4[1];
-                    chosen_stride = 0x18;
-                } else if ((candidates_mp4[2] >> 48) == 0xffff) {
-                    fp_mp4 = candidates_mp4[2];
-                    chosen_stride = 0x10;
-                } else if ((candidates_mp4[3] >> 48) == 0xffff) {
-                    fp_mp4 = candidates_mp4[3];
-                    chosen_stride = 0x08;
+                /* Пробуем разные размеры fdescent (0x18, 0x20, 0x28, 0x30) */
+                int chosen_stride = 0;
+                for (int fde_size = 0x18; fde_size <= 0x30; fde_size += 8) {
+                    uint32_t slot_off = 0x08 + fd_mp4 * fde_size;
+                    if (slot_off + 8 <= 0x400) {
+                        uint64_t fp = *(uint64_t*)(fdbuf + slot_off);
+                        klog_printf("[FDT fde_size=0x%x] fd=%d (off=+0x%x) fp=0x%llx\n",
+                                    fde_size, fd_mp4, slot_off, (unsigned long long)fp);
+                        if ((fp >> 48) == 0xffff && !fp_mp4) {
+                            fp_mp4 = fp;
+                            chosen_stride = fde_size;
+                        }
+                    }
                 }
 
                 if (fd_ioc >= 0 && chosen_stride) {
-                    kekcall(KEKCALL_DUMP_MEM, fd_ofiles + (uint64_t)fd_ioc * (uint64_t)chosen_stride, (uintptr_t)&fp_ioc, 8);
+                    uint32_t slot_ioc = 0x08 + fd_ioc * chosen_stride;
+                    if (slot_ioc + 8 <= 0x400) {
+                        fp_ioc = *(uint64_t*)(fdbuf + slot_ioc);
+                    }
                 }
-
-                klog_printf("[FILE_TEST] resolved fp_mp4=0x%llx fp_ioc=0x%llx (stride=0x%x)\n",
+                klog_printf("[FDT] resolved: fp_mp4=0x%llx fp_ioc=0x%llx (stride=0x%x)\n",
                             (unsigned long long)fp_mp4, (unsigned long long)fp_ioc, chosen_stride);
             }
         }
