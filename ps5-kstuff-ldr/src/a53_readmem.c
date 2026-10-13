@@ -3167,7 +3167,7 @@ probe_mp4_device(uint64_t curproc_hint)
  * ==================================================================== */
 
 #ifndef A53_DRY_RUN
-#define A53_DRY_RUN 1
+#define A53_DRY_RUN 0
 #endif
 
 /* ARM64 B/BL encoder. opcode = 0x14000000 (B) or 0x94000000 (BL). */
