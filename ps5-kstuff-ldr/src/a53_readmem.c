@@ -1591,14 +1591,15 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         close(nfd_rdonly);
     }
 
-    /* UCRED dump: hex window + extracted named fields */
+    /* OUR ucred dump: full 0x200 window + extracted named fields */
+    static uint8_t ucred_buf[0x200];
     if (our_ucred) {
-        uint8_t ucred_buf[128] = {0};
+        memset(ucred_buf, 0, sizeof(ucred_buf));
         long r_u = kekcall(KEKCALL_DUMP_MEM, our_ucred, (uintptr_t)ucred_buf, sizeof(ucred_buf));
-        klog_printf("[UCRED] our_ucred=0x%llx dump_ret=%ld\n",
+        klog_printf("[OUR_UCRED @ 0x%llx] dump_ret=%ld (size=0x200)\n",
                     (unsigned long long)our_ucred, r_u);
-        for (int b = 0; b < 128; b += 16) {
-            klog_printf("[UCRED+0x%03x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+        for (int b = 0; b < (int)sizeof(ucred_buf); b += 16) {
+            klog_printf("[OUR_UCRED+0x%03x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
                         b,
                         ucred_buf[b+0], ucred_buf[b+1], ucred_buf[b+2], ucred_buf[b+3],
                         ucred_buf[b+4], ucred_buf[b+5], ucred_buf[b+6], ucred_buf[b+7],
@@ -1612,6 +1613,9 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         uint64_t cr_prison     = *(uint64_t*)(ucred_buf + 0x30);
         uint64_t cr_sce_authid = *(uint64_t*)(ucred_buf + 0x58);
         uint64_t cr_label      = *(uint64_t*)(ucred_buf + 0x78);
+        uint64_t cr_118        = *(uint64_t*)(ucred_buf + 0x118);
+        uint64_t cr_120        = *(uint64_t*)(ucred_buf + 0x120);
+        uint64_t cr_1f8        = *(uint64_t*)(ucred_buf + 0x1f8);
 
         klog_printf("[UCRED_FIELDS] cr_uid=%u cr_ruid=%u cr_svuid=%u\n",
                     cr_uid, cr_ruid, cr_svuid);
@@ -1619,6 +1623,10 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                     (unsigned long long)cr_prison,
                     (unsigned long long)cr_sce_authid,
                     (unsigned long long)cr_label);
+        klog_printf("[UCRED_FIELDS] +0x118=0x%llx +0x120=0x%llx +0x1f8=0x%llx\n",
+                    (unsigned long long)cr_118,
+                    (unsigned long long)cr_120,
+                    (unsigned long long)cr_1f8);
 
         if (cr_label) {
             uint8_t lbl_buf[64] = {0};
@@ -1637,7 +1645,43 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
             klog_printf("[MAC_LABEL] cr_label=0 — no MAC policy label attached\n");
         }
     } else {
-        klog_printf("[UCRED] ERROR: our_ucred=0 — skipping ucred dump\n");
+        klog_printf("[OUR_UCRED] ERROR: our_ucred=0 — skipping dump\n");
+    }
+
+    /* SI_CRED dump: per-mp4-cdev. si_cred @ cdev+0xa8 */
+    static uint8_t sicred_buf[0x200];
+    for (int m = 0; m < mp4_count; m++) {
+        uint64_t cdev = mp4_cdev_nodes[m];
+        if (!cdev) continue;
+        uint64_t si_cred = 0;
+        kekcall(KEKCALL_DUMP_MEM, cdev + 0xa8ULL, (uintptr_t)&si_cred, 8);
+        klog_printf("[SI_CRED] cdev[%d] '%s' @ 0x%llx -> si_cred=0x%llx\n",
+                    m, mp4_names[m], (unsigned long long)cdev, (unsigned long long)si_cred);
+        if (!si_cred) {
+            klog_printf("[SI_CRED] cdev[%d] NULL — DAC via vnode mode/uid/gid, not ucred compare\n", m);
+            continue;
+        }
+        memset(sicred_buf, 0, sizeof(sicred_buf));
+        long r_sc = kekcall(KEKCALL_DUMP_MEM, si_cred, (uintptr_t)sicred_buf, sizeof(sicred_buf));
+        klog_printf("[SI_CRED @ 0x%llx cdev='%s'] dump_ret=%ld (size=0x200)\n",
+                    (unsigned long long)si_cred, mp4_names[m], r_sc);
+        for (int b = 0; b < (int)sizeof(sicred_buf); b += 16) {
+            klog_printf("[SI_CRED[%d]+0x%03x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
+                        m, b,
+                        sicred_buf[b+0], sicred_buf[b+1], sicred_buf[b+2], sicred_buf[b+3],
+                        sicred_buf[b+4], sicred_buf[b+5], sicred_buf[b+6], sicred_buf[b+7],
+                        sicred_buf[b+8], sicred_buf[b+9], sicred_buf[b+10], sicred_buf[b+11],
+                        sicred_buf[b+12], sicred_buf[b+13], sicred_buf[b+14], sicred_buf[b+15]);
+        }
+        uint32_t sc_uid    = *(uint32_t*)(sicred_buf + 0x04);
+        uint64_t sc_prison = *(uint64_t*)(sicred_buf + 0x30);
+        uint64_t sc_auth   = *(uint64_t*)(sicred_buf + 0x58);
+        uint64_t sc_label  = *(uint64_t*)(sicred_buf + 0x78);
+        klog_printf("[SI_CRED_FIELDS cdev[%d]] cr_uid=%u cr_prison=0x%llx cr_sce_authid=0x%llx cr_label=0x%llx\n",
+                    m, sc_uid,
+                    (unsigned long long)sc_prison,
+                    (unsigned long long)sc_auth,
+                    (unsigned long long)sc_label);
     }
     klog_printf("[NATIVE_OPEN] === END probe ===\n");
 
