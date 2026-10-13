@@ -1257,10 +1257,9 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
     }
 
     /* ========================================================================= */
-    /* DOPEN_HEX: SAFE_PEEK 0x400 реального d_open для mp4/dump_for_decid        */
-    /* ПЕРЕД любым STEP4-патчем csw. Трамплайн уже восстановлен на строке ~1169, */
-    /* csw+0x10 держит orig_dopen → резольвим jmp rel32 → читаем 1024 байта     */
-    /* тела через SAFE_PEEK (обход XOM благодаря Byepervisor).                   */
+    /* DOPEN_HEX: DUMP_MEM 0x400 реального d_open для mp4/dump_for_decid         */
+    /* ПЕРЕД STEP4. Используем KEKCALL_DUMP_MEM (nr 19) — kpeek64_checked внутри */
+    /* умеет большие страницы .text в отличие от SAFE_PEEK (который валит ядро). */
     /* ========================================================================= */
     if (dedicated_mp4_csw) {
         uint64_t orig_dopen = 0;
@@ -1271,11 +1270,11 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         uint64_t real_dopen = orig_dopen;
         if (orig_dopen && (orig_dopen >> 48) == 0xffff) {
             uint8_t tramp[16] = {0};
-            long tr = kekcall(KEKCALL_SAFE_PEEK, orig_dopen, (uintptr_t)tramp, 16);
-            klog_printf("[DOPEN_HEX] trampoline peek ret=%ld bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
+            long tr = kekcall(KEKCALL_DUMP_MEM, orig_dopen, (uintptr_t)tramp, 16);
+            klog_printf("[DOPEN_HEX] trampoline ret=%ld bytes: %02x %02x %02x %02x %02x %02x %02x %02x\n",
                         tr, tramp[0], tramp[1], tramp[2], tramp[3],
                         tramp[4], tramp[5], tramp[6], tramp[7]);
-            if (tr == 0 && tramp[0] == 0xe9) {
+            if (tr >= 5 && tramp[0] == 0xe9) {
                 int32_t rel32 = (int32_t)(tramp[1] | (tramp[2]<<8) | (tramp[3]<<16) | (tramp[4]<<24));
                 real_dopen = orig_dopen + 5 + (int64_t)rel32;
                 klog_printf("[DOPEN_HEX] decoded jmp rel32=0x%08x → real d_open = 0x%llx\n",
@@ -1287,8 +1286,8 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
 
         if (real_dopen && (real_dopen >> 48) == 0xffff) {
             uint8_t body[1024] = {0};
-            long pr = kekcall(KEKCALL_SAFE_PEEK, real_dopen, (uintptr_t)body, sizeof(body));
-            klog_printf("[DOPEN_HEX] === real d_open @ 0x%llx (0x400 bytes, peek_ret=%ld) ===\n",
+            long pr = kekcall(KEKCALL_DUMP_MEM, real_dopen, (uintptr_t)body, sizeof(body));
+            klog_printf("[DOPEN_HEX] === real d_open @ 0x%llx (0x400 bytes, dump_ret=%ld) ===\n",
                         (unsigned long long)real_dopen, pr);
             for (int l = 0; l < 64; l++) {
                 klog_printf("[DOPEN+0x%03x] %02x %02x %02x %02x %02x %02x %02x %02x  %02x %02x %02x %02x %02x %02x %02x %02x\n",
@@ -2019,55 +2018,43 @@ install_ppr_a53(uint32_t system_fw_version)
 
             uint8_t chunk[4096];
             uint64_t bytes_written = 0;
-            uint64_t pages_skipped = 0;
+            uint64_t pages_zero = 0;
             uint64_t iter = 0;
             const uint64_t total_iters = scan_size / sizeof(chunk);
             const uint64_t PROGRESS_EVERY = 128;
-            /* Если первые N подряд страниц все вернули EFAULT — значит Byepervisor
-             * не активен (XOM всё ещё блокирует .text), и нет смысла крутить все
-             * 8192 итераций: ранний выход без ребута консоли. */
-            const uint64_t XOM_PROBE_PAGES = 32;
-            int byepervisor_active = -1; /* -1 unknown, 0 no, 1 yes */
 
             for (uint64_t cur = scan_start; cur < scan_start + scan_size; cur += sizeof(chunk)) {
                 memset(chunk, 0, sizeof(chunk));
-                long ret = kekcall(KEKCALL_SAFE_PEEK, cur, (uint64_t)chunk, sizeof(chunk));
-                if (ret != 0) {
-                    memset(chunk, 0, sizeof(chunk));
-                    pages_skipped++;
-                } else if (byepervisor_active == -1) {
-                    byepervisor_active = 1;
-                    klog_printf("[KDUMP] *** SAFE_PEEK returned real page at iter=%llu → Byepervisor active\n",
-                                (unsigned long long)iter);
+                /* DUMP_MEM вместо SAFE_PEEK: умеет большие страницы .text, падает мягко
+                 * (возвращает нули для unmapped qword'ов, а не крашит ядро). */
+                long ret = kekcall(KEKCALL_DUMP_MEM, cur, (uint64_t)chunk, sizeof(chunk));
+                /* Эмпирика: если весь чанк пустой — скорее всего unmapped */
+                int all_zero = 1;
+                for (int z = 0; z < 64; z++) {
+                    if (((uint64_t*)chunk)[z] != 0) { all_zero = 0; break; }
                 }
-
-                /* Проверка после первых XOM_PROBE_PAGES итераций */
-                if (iter == XOM_PROBE_PAGES - 1 && byepervisor_active == -1) {
-                    byepervisor_active = 0;
-                    klog_printf("[KDUMP] *** All first %llu SAFE_PEEK calls returned EFAULT — Byepervisor NOT active, aborting KDUMP\n",
-                                (unsigned long long)XOM_PROBE_PAGES);
-                    break;
-                }
+                if (all_zero) pages_zero++;
 
                 ssize_t w = write(kdfd, chunk, sizeof(chunk));
                 if (w > 0) bytes_written += w;
 
-                /* Yield только когда реально читаем — EFAULT-случай не нагружает ядро */
-                if (ret == 0) usleep(100);
+                usleep(100);
 
                 iter++;
                 if ((iter % PROGRESS_EVERY) == 0 || iter == total_iters) {
-                    klog_printf("[KDUMP] progress %llu/%llu (%llu KB, skipped=%llu, at 0x%llx)\n",
+                    klog_printf("[KDUMP] progress %llu/%llu (%llu KB, zero_chunks=%llu, at 0x%llx)\n",
                                 (unsigned long long)iter,
                                 (unsigned long long)total_iters,
                                 (unsigned long long)(bytes_written / 1024),
-                                (unsigned long long)pages_skipped,
+                                (unsigned long long)pages_zero,
                                 (unsigned long long)(cur + sizeof(chunk)));
                 }
             }
             close(kdfd);
-            klog_printf("[KDUMP] Dump complete! Wrote %llu bytes to /data/kdump.bin (skipped unmapped pages: %llu)\n",
-                        (unsigned long long)bytes_written, (unsigned long long)pages_skipped);
+            klog_printf("[KDUMP] Dump complete! Wrote %llu bytes to /data/kdump.bin (zero_chunks=%llu/%llu)\n",
+                        (unsigned long long)bytes_written,
+                        (unsigned long long)pages_zero,
+                        (unsigned long long)total_iters);
         }
     }
 
