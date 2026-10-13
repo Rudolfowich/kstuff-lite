@@ -3395,6 +3395,39 @@ install_ppr_a53(uint32_t system_fw_version)
     memcpy(&profile_fw, profile, 4);
     klog_printf("[a53] profile found: profile_fw=0x%08x\n", profile_fw);
 
+    /* ==================================================================
+     * STAGE: apply PPR profile via A_11 writes (DRY_RUN logs only).
+     * Run EARLY — before the massive diagnostic probe below — because
+     * the probe can take minutes and may trigger a watchdog TMR violation.
+     * ================================================================== */
+    klog_printf("[a53] apply_profile (A53_DRY_RUN=%d)\n", A53_DRY_RUN);
+    {
+        struct a53_apply_ctx actx;
+        __builtin_memset(&actx, 0, sizeof(actx));
+        actx.dry_run = A53_DRY_RUN;
+        actx.fd = -1;
+
+        if (!A53_DRY_RUN) {
+            actx.fd = open("/dev/mp4/dump", O_RDWR);
+            if (actx.fd < 0) {
+                klog_printf("[a53] open(/dev/mp4/dump) failed errno=%d; abort apply\n",
+                            errno);
+                return -3;
+            }
+        }
+
+        int ar = apply_profile(profile, &actx);
+        klog_printf("[a53] apply_profile ret=%d writes ok=%u fail=%u\n",
+                    ar, actx.writes_ok, actx.writes_fail);
+
+        if (actx.fd >= 0) close(actx.fd);
+    }
+
+#if A53_DRY_RUN
+    /* Dry run: don't bother with the big diagnostic probe either. */
+    return 0;
+#endif
+
     /* Запрашиваем kernel diagnostic dump — безопасно, только чтение */
     klog_puts("[a53] requesting UELF diagnostic dump (kekcall 8) ...\n");
     uint64_t dump[136] = {0};
@@ -3493,31 +3526,7 @@ install_ppr_a53(uint32_t system_fw_version)
         return -2;
     }
 
-    /* ------------------------------------------------------------------ */
-    /* STAGE: apply PPR profile via A_11 writes.                          */
-    /* With A53_DRY_RUN=1 (default) this LOGS all writes but does nothing. */
-    /* ------------------------------------------------------------------ */
-    klog_printf("[a53] apply_profile (A53_DRY_RUN=%d)\n", A53_DRY_RUN);
-
-    struct a53_apply_ctx ctx;
-    __builtin_memset(&ctx, 0, sizeof(ctx));
-    ctx.dry_run = A53_DRY_RUN;
-    ctx.fd = -1;
-
-    if (!A53_DRY_RUN) {
-        ctx.fd = open("/dev/mp4/dump", O_RDWR);
-        if (ctx.fd < 0) {
-            klog_printf("[a53] open(/dev/mp4/dump) failed errno=%d; abort apply\n",
-                        errno);
-            return -3;
-        }
-    }
-
-    int ar = apply_profile(profile, &ctx);
-    klog_printf("[a53] apply_profile ret=%d writes ok=%u fail=%u\n",
-                ar, ctx.writes_ok, ctx.writes_fail);
-
-    if (ctx.fd >= 0) close(ctx.fd);
+    klog_puts("[a53] install_ppr_a53 end (post-probe)\n");
     return 0;
 }
 
