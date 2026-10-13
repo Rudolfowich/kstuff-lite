@@ -1711,6 +1711,26 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                                     klog_printf("[MP4_DUMP_CSW] trampoline resolved real_dopen=0x%llx\n",
                                                 (unsigned long long)md_real_dopen);
                                 }
+                                /* Dump 512 bytes of real_dopen to find real DAC bypass path */
+                                static uint8_t md_dbody[512];
+                                memset(md_dbody, 0, sizeof(md_dbody));
+                                kekcall(KEKCALL_DUMP_MEM, md_real_dopen, (uintptr_t)md_dbody, sizeof(md_dbody));
+                                klog_printf("[MP4_DUMP_REAL] real_dopen body dump 512 bytes:\n");
+                                for (int row = 0; row < 512; row += 32) {
+                                    klog_printf("[MDOPEN+%03x] %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                                                row,
+                                                md_dbody[row+0],md_dbody[row+1],md_dbody[row+2],md_dbody[row+3],
+                                                md_dbody[row+4],md_dbody[row+5],md_dbody[row+6],md_dbody[row+7],
+                                                md_dbody[row+8],md_dbody[row+9],md_dbody[row+10],md_dbody[row+11],
+                                                md_dbody[row+12],md_dbody[row+13],md_dbody[row+14],md_dbody[row+15],
+                                                md_dbody[row+16],md_dbody[row+17],md_dbody[row+18],md_dbody[row+19],
+                                                md_dbody[row+20],md_dbody[row+21],md_dbody[row+22],md_dbody[row+23],
+                                                md_dbody[row+24],md_dbody[row+25],md_dbody[row+26],md_dbody[row+27],
+                                                md_dbody[row+28],md_dbody[row+29],md_dbody[row+30],md_dbody[row+31]);
+                                }
+                                /* SKIP the risky +0x18 patch — we need to understand the body first */
+                                klog_printf("[MP4_DUMP_PATCH] skipping blind patch — body dumped for offline analysis\n");
+                                goto skip_md_patch;
                                 /* Try the same DOPEN_JMP recipe: read qword at real_dopen+0x18,
                                  * if it matches canonical, patch to jmp +0x51. */
                                 uint64_t md_patch_addr = md_real_dopen + 0x18;
