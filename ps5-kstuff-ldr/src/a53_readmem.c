@@ -540,7 +540,7 @@ probe_opened_mp4_fd(int fd, const char *name)
         klog_printf("[LIVE_FP] === Resolving struct file* for live fd=%d ===\n", fd);
         int fd_ref = 1; /* stdout гарантированно открыт */
         uint64_t fd_info[40] = {0};
-        long r_info = kekcall(KEKCALL_GET_FD_INFO, (uint64_t)fd, (uint64_t)fd_ref, (uintptr_t)fd_info);
+        kekcall(KEKCALL_GET_FD_INFO, (uint64_t)fd, (uint64_t)fd_ref, (uintptr_t)fd_info);
         uint64_t fp_live = fd_info[2];
         uint64_t fp_ref  = fd_info[3];
 
