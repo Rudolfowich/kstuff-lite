@@ -1429,6 +1429,69 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
         args[RAX] = cur_val;
         return 0;
     }
+    else if(nr == 41)
+    {
+        /* SET_PTE_FLAGS: walk CR3 page tables, OR flags into PTE for given VA.
+         * args[RDI] = kernel VA
+         * args[RSI] = flags mask to OR (e.g. 0x2 = PG_RW)
+         * args[RDX] = clear mask (e.g. 0 for no clear)
+         * return 0 on success, EFAULT on walk failure.
+         */
+        uint64_t va = args[RDI];
+        uint64_t or_mask = args[RSI];
+        uint64_t and_mask = ~args[RDX];
+
+        /* Read CR3 to get PML4 PA */
+        uint64_t cr3;
+        __asm__ volatile("mov %%cr3, %0" : "=r"(cr3));
+        cr3 &= ~0xfffULL;
+
+        /* Walk: PML4 -> PDPT -> PD -> PT */
+        uint64_t pml4_idx = (va >> 39) & 0x1ff;
+        uint64_t pdpt_idx = (va >> 30) & 0x1ff;
+        uint64_t pd_idx   = (va >> 21) & 0x1ff;
+        uint64_t pt_idx   = (va >> 12) & 0x1ff;
+
+        uint64_t pml4e = *(volatile uint64_t*)(DMEM + cr3 + pml4_idx * 8);
+        if (!(pml4e & 1)) return EFAULT;
+        uint64_t pdpt_pa = pml4e & 0x000ffffffffff000ULL;
+
+        uint64_t pdpte = *(volatile uint64_t*)(DMEM + pdpt_pa + pdpt_idx * 8);
+        if (!(pdpte & 1)) return EFAULT;
+        /* Check PS bit (1 GB page) */
+        if (pdpte & (1ULL << 7)) {
+            uint64_t pdpte_addr = pdpt_pa + pdpt_idx * 8;
+            uint64_t new_pdpte = (pdpte & and_mask) | or_mask;
+            *(volatile uint64_t*)(DMEM + pdpte_addr) = new_pdpte;
+            args[RAX] = 0;
+            return 0;
+        }
+        uint64_t pd_pa = pdpte & 0x000ffffffffff000ULL;
+
+        uint64_t pde = *(volatile uint64_t*)(DMEM + pd_pa + pd_idx * 8);
+        if (!(pde & 1)) return EFAULT;
+        /* Check PS bit (2 MB page) */
+        if (pde & (1ULL << 7)) {
+            uint64_t pde_addr = pd_pa + pd_idx * 8;
+            uint64_t new_pde = (pde & and_mask) | or_mask;
+            *(volatile uint64_t*)(DMEM + pde_addr) = new_pde;
+            args[RAX] = 0;
+            return 0;
+        }
+        uint64_t pt_pa = pde & 0x000ffffffffff000ULL;
+
+        /* 4 KB page: patch PTE */
+        uint64_t pte_addr = pt_pa + pt_idx * 8;
+        uint64_t pte = *(volatile uint64_t*)(DMEM + pte_addr);
+        uint64_t new_pte = (pte & and_mask) | or_mask;
+        *(volatile uint64_t*)(DMEM + pte_addr) = new_pte;
+
+        /* TLB flush for this VA */
+        __asm__ volatile("invlpg (%0)" :: "r"(va) : "memory");
+
+        args[RAX] = 0;
+        return 0;
+    }
     else if(nr == 40)
     {
         /* WRITE_PHYS: write to physical memory via DMEM mapping (bypasses WP).
