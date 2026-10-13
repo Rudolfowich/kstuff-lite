@@ -1534,13 +1534,28 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                      * renamed mp4/dump → mp4/dump_for_decid (our existing jfd target). */
                     {
                         struct stat sb_dump = {0};
+                        struct stat sb_decid = {0};
                         errno = 0;
                         int sr = stat("/dev/mp4/dump", &sb_dump);
-                        klog_printf("[MP4_DUMP_STAT] stat('/dev/mp4/dump') ret=%d errno=%d\n", sr, errno);
+                        klog_printf("[MP4_DUMP_STAT] stat('/dev/mp4/dump') ret=%d errno=%d mode=0%o rdev=0x%llx ino=%lld\n",
+                                    sr, errno, (unsigned)sb_dump.st_mode,
+                                    (unsigned long long)sb_dump.st_rdev,
+                                    (long long)sb_dump.st_ino);
                         errno = 0;
-                        int sr2 = stat("/dev/mp4/dump_for_decid", &sb_dump);
-                        klog_printf("[MP4_DUMP_STAT] stat('/dev/mp4/dump_for_decid') ret=%d errno=%d size=%lld\n",
-                                    sr2, errno, (long long)sb_dump.st_size);
+                        int sr2 = stat("/dev/mp4/dump_for_decid", &sb_decid);
+                        klog_printf("[MP4_DUMP_STAT] stat('/dev/mp4/dump_for_decid') ret=%d errno=%d mode=0%o rdev=0x%llx ino=%lld\n",
+                                    sr2, errno, (unsigned)sb_decid.st_mode,
+                                    (unsigned long long)sb_decid.st_rdev,
+                                    (long long)sb_decid.st_ino);
+                        klog_printf("[MP4_DUMP_STAT] SAME CDEV? rdev %s, ino %s\n",
+                                    (sb_dump.st_rdev == sb_decid.st_rdev) ? "YES" : "NO",
+                                    (sb_dump.st_ino == sb_decid.st_ino) ? "YES" : "NO");
+                        /* fstat our open mp4/dump_for_decid fd to compare */
+                        struct stat sb_fd = {0};
+                        if (fstat(jfd, &sb_fd) == 0) {
+                            klog_printf("[MP4_DUMP_STAT] fstat(jfd=%d /*mp4/dump_for_decid open*/) rdev=0x%llx ino=%lld\n",
+                                        jfd, (unsigned long long)sb_fd.st_rdev, (long long)sb_fd.st_ino);
+                        }
                         /* list /dev/mp4/ contents */
                         DIR *dp = opendir("/dev/mp4");
                         if (dp) {
