@@ -1110,42 +1110,65 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         /* Надежный curproc: scanned_proc получен из KEKCALL_SCAN_TD_UCRED */
         uint64_t my_curproc = scanned_proc;
         uint64_t p_fd = 0;
+        int p_fd_off = -1;
+        uint64_t verified_fd_files = 0;
 
         if (my_curproc) {
-            kekcall(KEKCALL_DUMP_MEM, my_curproc + 0x00ULL, (uintptr_t)&p_fd, 8);
+            uint8_t pbuf[0x400] = {0};
+            kekcall(KEKCALL_DUMP_MEM, my_curproc, (uintptr_t)pbuf, 0x400);
+
+            for (int off = 0; off < 0x400; off += 8) {
+                uint64_t v = *(uint64_t*)(pbuf + off);
+                /* Проверка 1: heap pointer (не kernel .text / .data 0xffffffff...) */
+                if ((v >> 48) != 0xffff || (v >> 40) == 0xffffff) continue;
+
+                /* Проверка 2: v+0x08 тоже heap pointer */
+                uint64_t fd_files = 0;
+                kekcall(KEKCALL_DUMP_MEM, v + 0x08ULL, (uintptr_t)&fd_files, 8);
+                if ((fd_files >> 48) != 0xffff || (fd_files >> 40) == 0xffffff) continue;
+
+                /* Проверка 3: *(fd_files) или *(fd_files+8) — struct file* (heap, не text) */
+                uint64_t first_fp = 0;
+                kekcall(KEKCALL_DUMP_MEM, fd_files, (uintptr_t)&first_fp, 8);
+                if ((first_fp >> 48) != 0xffff || (first_fp >> 40) == 0xffffff) {
+                    kekcall(KEKCALL_DUMP_MEM, fd_files + 0x08ULL, (uintptr_t)&first_fp, 8);
+                    if ((first_fp >> 48) != 0xffff || (first_fp >> 40) == 0xffffff) continue;
+                }
+
+                /* ПРАВИЛЬНЫЙ p_fd найден */
+                p_fd = v;
+                p_fd_off = off;
+                verified_fd_files = fd_files;
+                klog_printf("[P_FD_REAL] offset=0x%x p_fd=0x%llx fd_files=0x%llx first_fp=0x%llx\n",
+                            off, (unsigned long long)v, (unsigned long long)fd_files, (unsigned long long)first_fp);
+                break;
+            }
         }
-        klog_printf("[P_FD] proc+0x0 -> p_fd=0x%llx\n", (unsigned long long)p_fd);
 
         uint64_t fp_mp4 = 0, fp_null = 0;
         uint32_t f_cdevpriv_off = 0;
 
-        if (p_fd && (p_fd >> 48) == 0xffff && fd_mp4 >= 0) {
-            uint64_t fd_ofiles = 0;
-            kekcall(KEKCALL_DUMP_MEM, p_fd + 0x08ULL, (uintptr_t)&fd_ofiles, 8);
+        if (p_fd && verified_fd_files && fd_mp4 >= 0) {
+            uint8_t fdbuf[0x400] = {0};
+            kekcall(KEKCALL_DUMP_MEM, verified_fd_files, (uintptr_t)fdbuf, 0x400);
 
-            if ((fd_ofiles >> 48) == 0xffff) {
-                uint8_t fdbuf[0x400] = {0};
-                kekcall(KEKCALL_DUMP_MEM, fd_ofiles, (uintptr_t)fdbuf, 0x400);
-
-                /* Печатаем первые 16 слотов по 8 байт для ясности */
-                klog_printf("[FDT_RAW_SLOTS]:\n");
-                for (int s = 0; s < 24; s++) {
-                    uint64_t val = *(uint64_t*)(fdbuf + s * 8);
-                    klog_printf("  slot[%02d] (+0x%02x) = 0x%016llx\n", s, s * 8, (unsigned long long)val);
-                }
-
-                /* Во FreeBSD struct fdescent: fde_file (+0x00) или (+0x08) */
-                for (int s = 0; s < 16; s++) {
-                    uint64_t cand = *(uint64_t*)(fdbuf + s * 8);
-                    if ((cand >> 48) == 0xffff) {
-                        if (!fp_mp4) fp_mp4 = cand;
-                        else if (!fp_null && cand != fp_mp4) fp_null = cand;
-                    }
-                }
-
-                klog_printf("[FDT] candidates: fp_mp4=0x%llx fp_null=0x%llx\n",
-                            (unsigned long long)fp_mp4, (unsigned long long)fp_null);
+            klog_printf("[FDT_RAW_SLOTS]:\n");
+            for (int s = 0; s < 24; s++) {
+                uint64_t val = *(uint64_t*)(fdbuf + s * 8);
+                klog_printf("  slot[%02d] (+0x%02x) = 0x%016llx\n", s, s * 8, (unsigned long long)val);
             }
+
+            /* Ищем слоты heap pointers */
+            for (int s = 0; s < 24; s++) {
+                uint64_t cand = *(uint64_t*)(fdbuf + s * 8);
+                if ((cand >> 48) == 0xffff && (cand >> 40) != 0xffffff) {
+                    if (!fp_mp4) fp_mp4 = cand;
+                    else if (!fp_null && cand != fp_mp4) fp_null = cand;
+                }
+            }
+
+            klog_printf("[FDT] candidates: fp_mp4=0x%llx fp_null=0x%llx\n",
+                        (unsigned long long)fp_mp4, (unsigned long long)fp_null);
         }
 
         /* Выравниваем на 8 байт для безопасности */
