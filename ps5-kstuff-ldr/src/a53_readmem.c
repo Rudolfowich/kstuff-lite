@@ -1107,15 +1107,31 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
         int fd_ioc = open("/dev/deci_mp4_ioc", O_RDWR);
         klog_printf("[FILE_TEST] opened fds: fd_mp4=%d fd_ioc=%d\n", fd_mp4, fd_ioc);
 
-        /* Надежный curproc и p_fd:
-         * scanned_proc получен из KEKCALL_SCAN_TD_UCRED ранее (смещение p_fd = +0x48) */
+        /* Надежный curproc: scanned_proc получен из KEKCALL_SCAN_TD_UCRED */
         uint64_t my_curproc = scanned_proc;
         uint64_t p_fd = 0;
+        int p_fd_off = -1;
+
         if (my_curproc) {
-            kekcall(KEKCALL_DUMP_MEM, my_curproc + 0x48ULL, (uintptr_t)&p_fd, 8);
+            uint8_t pbuf[0x400] = {0};
+            kekcall(KEKCALL_DUMP_MEM, my_curproc, (uintptr_t)pbuf, 0x400);
+            for (int off = 0; off < 0x400; off += 8) {
+                uint64_t v = *(uint64_t*)(pbuf + off);
+                if ((v >> 48) == 0xffff) {
+                    uint64_t next = 0;
+                    kekcall(KEKCALL_DUMP_MEM, v + 0x08ULL, (uintptr_t)&next, 8);
+                    int is_fd = ((next >> 48) == 0xffff);
+                    klog_printf("[P_SCAN] proc+0x%03x = 0x%llx next=0x%llx %s\n",
+                                off, (unsigned long long)v, (unsigned long long)next,
+                                is_fd ? "CANDIDATE" : "");
+                    if (is_fd && !p_fd) {
+                        p_fd = v;
+                        p_fd_off = off;
+                    }
+                }
+            }
         }
-        klog_printf("[FILE_TEST] my_curproc=0x%llx p_fd=0x%llx\n",
-                    (unsigned long long)my_curproc, (unsigned long long)p_fd);
+        klog_printf("[P_FD_FOUND] offset=0x%x p_fd=0x%llx\n", p_fd_off, (unsigned long long)p_fd);
 
         uint64_t fp_mp4 = 0, fp_ioc = 0;
         if (p_fd && fd_mp4 >= 0) {
