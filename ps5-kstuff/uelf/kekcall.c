@@ -1451,12 +1451,22 @@ int handle_kekcall(uint64_t* regs, uint64_t* args, uint32_t nr)
             uint64_t next_pml = *(uint64_t*)(DMEM + ent_pa);
             if (!(next_pml & 1)) return EFAULT;
 
-            /* leaf: large page (PS bit set) or final PTE at i == 12 */
-            if ((next_pml & 128) || i == 12) {
+            /* leaf: large page (PS bit) only on PDPT (i=30) or PD (i=21),
+             * never on PML4 (i=39). Final PTE at i == 12 is always leaf. */
+            int is_leaf = (i == 12) ||
+                          ((i == 30 || i == 21) && (next_pml & 128));
+            if (is_leaf) {
                 uint64_t new_val = (next_pml & and_mask) | or_mask;
                 *(volatile uint64_t*)(DMEM + ent_pa) = new_val;
+
+                /* Local TLB flush. NOTE: PS5 has 16 cores — this only flushes
+                 * the current core's TLB. Other cores may still cache stale
+                 * RO entry → page fault when they touch this VA.
+                 * Caller should serialize access (do write + follow-up on
+                 * same CPU) or implement full TLB shootdown via IPI. */
                 __asm__ volatile("invlpg (%0)" :: "r"(va) : "memory");
-                args[RAX] = ent_pa;   /* return PTE PA for diagnostics */
+
+                args[RAX] = ent_pa;   /* return entry PA for diagnostics */
                 return 0;
             }
             pml = next_pml & ((1ull << 52) - (1ull << 12));
