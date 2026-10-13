@@ -1554,15 +1554,32 @@ find_and_patch_mp4_cdevsw(uint64_t curproc_hint)
                             klog_printf("[MP4_DUMP_LS] opendir failed errno=%d\n", errno);
                         }
                     }
+                    /* Try test6's recipe: revoke() first then open() */
+                    extern long syscall(long, ...);
+                    errno = 0;
+                    long rv = syscall(56, "/dev/mp4/dump");  // SYS_revoke
+                    klog_printf("[MP4_DUMP_REVOKE] syscall(56, /dev/mp4/dump) ret=%ld errno=%d\n", rv, errno);
                     errno = 0;
                     int md_fd = open("/dev/mp4/dump", O_RDWR);
                     int md_err = errno;
-                    klog_printf("[MP4_DUMP_OPEN] O_RDWR fd=%d errno=%d\n", md_fd, md_err);
+                    klog_printf("[MP4_DUMP_OPEN] after-revoke O_RDWR fd=%d errno=%d\n", md_fd, md_err);
                     if (md_fd < 0) {
                         errno = 0;
                         md_fd = open("/dev/mp4/dump", O_RDONLY);
                         md_err = errno;
                         klog_printf("[MP4_DUMP_OPEN] O_RDONLY fd=%d errno=%d\n", md_fd, md_err);
+                    }
+                    if (md_fd < 0) {
+                        /* Try O_NONBLOCK */
+                        errno = 0;
+                        md_fd = open("/dev/mp4/dump", O_RDONLY | O_NONBLOCK);
+                        klog_printf("[MP4_DUMP_OPEN] O_RDONLY|O_NONBLOCK fd=%d errno=%d\n", md_fd, errno);
+                    }
+                    if (md_fd < 0) {
+                        /* Try O_PATH equivalent — just path open */
+                        errno = 0;
+                        md_fd = open("/dev/mp4/dump", 0x100000);  // O_PATH-ish
+                        klog_printf("[MP4_DUMP_OPEN] O_PATH-ish fd=%d errno=%d\n", md_fd, errno);
                     }
                     if (md_fd < 0) {
                         /* First open failed — mp4/dump has a DIFFERENT cdevsw than
