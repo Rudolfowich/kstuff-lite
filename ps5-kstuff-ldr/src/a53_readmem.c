@@ -3702,9 +3702,12 @@ install_ppr_a53(uint32_t system_fw_version)
         if (actx.fd >= 0) close(actx.fd);
     }
 
+    /* Run the legacy probe_mp4_device (CDEV_SCAN finds cdev+softc and logs
+     * them). Under DRY_RUN=1 apply_profile already finished without writes,
+     * so letting this run is informational only. */
 #if A53_DRY_RUN
-    /* Dry run: don't bother with the big diagnostic probe either. */
-    return 0;
+    klog_puts("[a53] DRY_RUN mode: skipping kekcall ext dumps + KDUMP, going straight to probe\n");
+    goto run_probe;
 #endif
 
     /* Запрашиваем kernel diagnostic dump — безопасно, только чтение */
@@ -3796,10 +3799,11 @@ install_ppr_a53(uint32_t system_fw_version)
         }
     }
 
+run_probe:;
     /* Device probe (runs xref_scan_text). Запускается ПОСЛЕ KDUMP, т.к. deep
      * probe может висеть минутами на ioctl/write mp4-cdev и прерывать все
      * последующие шаги. */
-    uint64_t curproc_hint = (rc > 38) ? ext_buf[38] : 0;
+    uint64_t curproc_hint = 0;
     if (probe_mp4_device(curproc_hint) != 0) {
         klog_puts("[a53] MP4 device not accessible — abort\n");
         return -2;
