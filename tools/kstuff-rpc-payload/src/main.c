@@ -734,7 +734,8 @@ static int handle_kekcall_full(int fd, const uint8_t *args, uint32_t alen)
     uint64_t *buf = malloc(nwords * 8);
     if (!buf) return send_response(fd, -ENOMEM, NULL, 0);
     memset(buf, 0, nwords * 8);
-    long rc = kekcall_full(nr64, (uint64_t)buf, nwords, a3);
+    /* kekcalls like SHARED_AREA_SNAPSHOT expect RSI=byte_size, not element count. */
+    long rc = kekcall_full(nr64, (uint64_t)buf, (uint64_t)nwords * 8, a3);
     klog_printf("[K_FULL] nr=0x%llx nwords=%u a3=0x%llx rc=%ld\n",
                 (unsigned long long)nr64, nwords, (unsigned long long)a3, rc);
 
