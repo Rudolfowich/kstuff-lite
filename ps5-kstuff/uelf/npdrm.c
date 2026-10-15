@@ -142,6 +142,13 @@ int try_handle_npdrm_mailbox(uint64_t *regs, uint64_t lr)
     if (rif->type != 0x2)
     {
         METRIC_INC(npdrm_reject_bad_rif_type);
+        /* Debug: log the actual RIF type we rejected so we can learn
+         * the FW-specific type to accept. Marker 'RIFTYPE1' then type (u16). */
+        log_word(0x524946545950453131ull); /* "RIFTYPE11" marker */
+        log_word((uint64_t)rif->type);
+        log_word((uint64_t)rif->version);
+        log_word((uint64_t)rif->drmType);
+        log_word((uint64_t)rif->contentType);
 #ifdef NPDRM_PORTING
         RETURN_NPDRM(0);
 #else
