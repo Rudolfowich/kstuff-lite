@@ -68,6 +68,23 @@ kekcall(uint32_t nr, uint64_t a1, uint64_t a2, uint64_t a3)
     return (long)rax;
 }
 
+/* Full 64-bit nr kekcall — nr placed directly in rax, no SYS_getppid OR.
+ * Needed for KEKCALL_SHARED_AREA_SNAPSHOT=0x600000027 and others that use
+ * a non-getppid syscall base in low 32 bits. */
+static inline __attribute__((noinline)) long
+kekcall_full(uint64_t nr64, uint64_t a1, uint64_t a2, uint64_t a3)
+{
+    register uint64_t rax asm("rax") = nr64;
+    register uint64_t rdi asm("rdi") = a1;
+    register uint64_t rsi asm("rsi") = a2;
+    register uint64_t rdx asm("rdx") = a3;
+    asm volatile("syscall"
+                 : "+r"(rax), "+r"(rdi), "+r"(rsi), "+r"(rdx)
+                 :
+                 : "rcx", "r8", "r9", "r10", "r11", "memory");
+    return (long)rax;
+}
+
 /* ---- protocol --------------------------------------------------------- */
 
 #define RPC_CMD_PING    0x01
@@ -85,6 +102,8 @@ kekcall(uint32_t nr, uint64_t a1, uint64_t a2, uint64_t a3)
 #define RPC_CMD_A53_SDBGP_TX  0x0d
 #define RPC_CMD_A53_SESSION_RUN 0x0e
 #define RPC_CMD_A53_KEKCALL_DUMP 0x0f
+#define RPC_CMD_RESOLVE_FD_CDEV  0x10
+#define RPC_CMD_KEKCALL_FULL     0x11
 
 #define KEKCALL_DUMP_PHYS       28
 
@@ -697,6 +716,39 @@ static int handle_kbase(int fd)
     return send_response(fd, 0, out, 8);
 }
 
+/* RPC_CMD_KEKCALL_FULL: full 64-bit nr kekcall with output buffer.
+ * args: u64 nr64, u32 nwords, u64 a3  (20 bytes total)
+ * calls kekcall_full(nr64, (uint64_t)buf, nwords, a3)
+ * returns: rc (u64) + buf (nwords*8 bytes)
+ * Supports up to 1024 u64 words (8KB buffer) — enough for
+ * KEKCALL_SHARED_AREA_SNAPSHOT (6192 bytes). */
+static int handle_kekcall_full(int fd, const uint8_t *args, uint32_t alen)
+{
+    if (alen != 20) return send_response(fd, RPC_ERR_PROTO, NULL, 0);
+    uint64_t nr64, a3;
+    uint32_t nwords;
+    memcpy(&nr64,   args + 0, 8);
+    memcpy(&nwords, args + 8, 4);
+    memcpy(&a3,     args + 12, 8);
+    if (nwords > 1024) nwords = 1024;
+    uint64_t *buf = malloc(nwords * 8);
+    if (!buf) return send_response(fd, -ENOMEM, NULL, 0);
+    memset(buf, 0, nwords * 8);
+    long rc = kekcall_full(nr64, (uint64_t)buf, nwords, a3);
+    klog_printf("[K_FULL] nr=0x%llx nwords=%u a3=0x%llx rc=%ld\n",
+                (unsigned long long)nr64, nwords, (unsigned long long)a3, rc);
+
+    uint32_t bytes_out = nwords * 8;
+    uint8_t *resp = malloc(8 + bytes_out);
+    if (!resp) { free(buf); return send_response(fd, -ENOMEM, NULL, 0); }
+    memcpy(resp + 0, &rc, 8);
+    memcpy(resp + 8, buf, bytes_out);
+    int r = send_response(fd, 0, resp, 8 + bytes_out);
+    free(resp);
+    free(buf);
+    return r;
+}
+
 /* Fixed-length substring search (name buffer may contain embedded NULs
  * from DUMP_MEM's 8-byte-alignment-down behavior). */
 static int my_contains_n(const char *hay, int hay_len, const char *needle)
@@ -812,17 +864,48 @@ done:;
                 arenas[narenas++] = guesses[k];
             }
         }
-        /* Also walk proc list */
+        /* Also walk proc list. Use 32-bit prefix mask so each distinct heap chunk
+         * boundary becomes its own arena entry (previous 40-bit mask was too wide
+         * and merged 0xffffb174.. with 0xffffb100.., then only 256MB from base
+         * covered the wrong 16GB range). */
         uint64_t p = first_proc;
-        for (int step = 0; step < 100 && p; step++) {
-            uint64_t prefix = p & 0xffffff0000000000ULL;
+        for (int step = 0; step < 300 && p; step++) {
+            uint64_t prefix = p & 0xffffffff00000000ULL;
             int seen = 0;
             for (unsigned k = 0; k < narenas; k++) if (arenas[k] == prefix) { seen = 1; break; }
             if (!seen && narenas < 32) arenas[narenas++] = prefix;
+            /* Also peek p->p_fd (offset 0x48) to collect fdp allocator arena */
+            uint64_t pfd = 0;
+            kekcall(KEKCALL_DUMP_MEM, p + 0x48, (uintptr_t)&pfd, 8);
+            if (pfd) {
+                uint64_t pfprefix = pfd & 0xffffffff00000000ULL;
+                int seen2 = 0;
+                for (unsigned k = 0; k < narenas; k++) if (arenas[k] == pfprefix) { seen2 = 1; break; }
+                if (!seen2 && narenas < 32) arenas[narenas++] = pfprefix;
+            }
             uint64_t next = 0;
             kekcall(KEKCALL_DUMP_MEM, p, (uintptr_t)&next, 8);
             if (next == p || next == 0) break;
             p = next;
+        }
+        /* Add nearby 1GB-stride arenas around every found arena to catch sibling
+         * heap chunks (the kernel allocator uses multiple cdev-backing arenas
+         * within the same 32-bit zone). */
+        unsigned base_narenas = narenas;
+        for (unsigned k = 0; k < base_narenas && narenas < 32; k++) {
+            for (int d = -2; d <= 2; d++) {
+                if (d == 0) continue;
+                uint64_t cand = arenas[k] + (int64_t)d * 0x100000000ULL;
+                int seen = 0;
+                for (unsigned j = 0; j < narenas; j++) if (arenas[j] == cand) { seen = 1; break; }
+                if (seen) continue;
+                /* Probe liveness */
+                uint64_t probe = 0;
+                kekcall(KEKCALL_DUMP_MEM, cand, (uintptr_t)&probe, 8);
+                uint64_t probe2 = 0;
+                kekcall(KEKCALL_DUMP_MEM, cand + 0x1000000ULL, (uintptr_t)&probe2, 8);
+                if ((probe || probe2) && narenas < 32) arenas[narenas++] = cand;
+            }
         }
         klog_printf("[FIND_MP4] arenas: %u\n", narenas);
         for (unsigned k = 0; k < narenas; k++) {
@@ -834,9 +917,9 @@ done:;
             unsigned hits = 0;
             for (unsigned ai = 0; ai < narenas && !cdev; ai++) {
                 uint64_t heap_base = arenas[ai];
-                klog_printf("[FIND_MP4] scanning arena 0x%llx..+256MB\n",
+                klog_printf("[FIND_MP4] scanning arena 0x%llx..+1GB\n",
                             (unsigned long long)heap_base);
-                for (uint64_t off = 0; off < 0x10000000ULL && !cdev; off += 0x100000) {
+                for (uint64_t off = 0; off < 0x40000000ULL && !cdev; off += 0x100000) {
                     __builtin_memset(buf, 0, 0x100000);
                     for (unsigned coff = 0; coff < 0x100000; coff += 4096) {
                         kekcall(KEKCALL_DUMP_MEM, heap_base + off + coff,
@@ -855,15 +938,28 @@ done:;
                             klog_printf("[FIND_MP4] cand=0x%llx nm='%.16s'\n",
                                         (unsigned long long)cand, nm);
                         }
-                        if (my_contains_n(nm, 16, "mp4/dump") &&
-                            !my_contains_n(nm, 16, "decid") &&
-                            !my_contains_n(nm, 16, "syscore")) {
+                        /* Verify by re-reading csw at cand+0xb8 — if it matches
+                         * our target csw, this IS a cdev of our cdevsw. The name
+                         * (cand+0xe0) is only for logging / preference ordering. */
+                        uint64_t ver_csw = 0;
+                        kekcall(KEKCALL_DUMP_MEM, cand + 0xb8, (uintptr_t)&ver_csw, 8);
+                        if (ver_csw != csw) continue;
+                        /* Prefer syscore name; accept any csw-matching cdev as fallback. */
+                        int is_syscore = my_contains_n(nm, 16, "syscore");
+                        int is_decid   = my_contains_n(nm, 16, "decid");
+                        if (hits <= 20) {
+                            klog_printf("[FIND_MP4] match cand=0x%llx nm='%.16s' sys=%d dec=%d\n",
+                                        (unsigned long long)cand, nm, is_syscore, is_decid);
+                        }
+                        if (is_decid) continue; /* skip the decid variant */
+                        /* Accept syscore immediately; else keep first non-decid as fallback */
+                        if (is_syscore || cdev == 0) {
                             cdev = cand;
                             kekcall(KEKCALL_DUMP_MEM, cand + 0xa8, (uintptr_t)&softc, 8);
                             if (softc) {
                                 kekcall(KEKCALL_DUMP_MEM, softc + 0x6b8, (uintptr_t)&dump_va, 8);
                             }
-                            break;
+                            if (is_syscore) break; /* stop on exact match */
                         }
                     }
                 }
@@ -879,6 +975,112 @@ done:;
     __builtin_memcpy(out + 16, &csw,     8);
     __builtin_memcpy(out + 24, &dump_va, 8);
     return send_response(rpcfd, 0, out, 32);
+}
+
+/* RPC_CMD_RESOLVE_FD_CDEV (0x10): open the given devfs path, walk our fd
+ * table to the resulting cdev, then return
+ *   out[64] = {cdev, softc, dev_sec, si_devsw, arm_target, dba, dbb, dbc}
+ * The driver's sx/openlock/DAC gates MUST already be patched externally
+ * before calling this (otherwise open() EPERM/EMFILE). */
+static int handle_resolve_fd_cdev(int rpcfd, const uint8_t *args, uint32_t alen)
+{
+    if (alen < 2 || alen > 255) return send_response(rpcfd, RPC_ERR_PROTO, NULL, 0);
+    char path[256] = {0};
+    __builtin_memcpy(path, args, alen);
+    path[alen] = 0;
+
+    int fd = open(path, 0);
+    int oe = errno;
+    klog_printf("[RESOLVE] open('%s') ret=%d errno=%d\n", path, fd, oe);
+    if (fd < 0) return send_response(rpcfd, -oe, NULL, 0);
+
+    uint64_t kb = (uint64_t)kekcall(KEKCALL_GET_KBASE, 0, 0, 0);
+    uint64_t allproc = kb + 0x28c9e80ULL;
+    uint32_t my_pid = (uint32_t)getpid();
+
+    uint64_t p = 0;
+    kekcall(KEKCALL_DUMP_MEM, allproc, (uintptr_t)&p, 8);
+
+    uint64_t my_proc = 0;
+    for (int step = 0; step < 500 && p; step++) {
+        uint64_t pid_qword = 0;
+        kekcall(KEKCALL_DUMP_MEM, (p + 0xBC) & ~7ULL, (uintptr_t)&pid_qword, 8);
+        uint32_t pid = (uint32_t)(pid_qword >> 32);
+        if (pid == my_pid) { my_proc = p; break; }
+        uint64_t next = 0;
+        kekcall(KEKCALL_DUMP_MEM, p, (uintptr_t)&next, 8);
+        if (next == p || next == 0) break;
+        p = next;
+    }
+
+    uint64_t cdev = 0, softc = 0, dev_sec = 0, si_devsw = 0;
+    uint64_t arm_target = 0, dba = 0, dbb = 0, dbc = 0;
+    char si_name[32] = {0};
+
+    if (my_proc) {
+        uint64_t p_fd = 0;
+        kekcall(KEKCALL_DUMP_MEM, my_proc + 0x48, (uintptr_t)&p_fd, 8);
+        uint64_t fd_files = 0;
+        if (p_fd) kekcall(KEKCALL_DUMP_MEM, p_fd, (uintptr_t)&fd_files, 8);
+        if (fd_files) {
+            uint64_t entry_base = fd_files + 0x08 + (uint64_t)fd * 0x30;
+            uint64_t fde_file = 0;
+            kekcall(KEKCALL_DUMP_MEM, entry_base, (uintptr_t)&fde_file, 8);
+            if (fde_file) {
+                uint64_t vnode_or_cdev = 0;
+                kekcall(KEKCALL_DUMP_MEM, fde_file, (uintptr_t)&vnode_or_cdev, 8);
+                if (vnode_or_cdev) {
+                    uint64_t cand_sidevsw = 0;
+                    kekcall(KEKCALL_DUMP_MEM, vnode_or_cdev + 0xb8,
+                            (uintptr_t)&cand_sidevsw, 8);
+                    uint64_t expected_csw = kb + 0x1f3ddb0ULL;
+                    if (cand_sidevsw == expected_csw) {
+                        cdev = vnode_or_cdev;
+                    } else {
+                        uint8_t vbuf[256];
+                        __builtin_memset(vbuf, 0, 256);
+                        kekcall(KEKCALL_DUMP_MEM, vnode_or_cdev, (uintptr_t)vbuf, 256);
+                        for (unsigned i = 0; i + 8 <= 256; i += 8) {
+                            uint64_t q;
+                            __builtin_memcpy(&q, vbuf + i, 8);
+                            if ((q >> 48) != 0xffff) continue;
+                            uint64_t sv = 0;
+                            kekcall(KEKCALL_DUMP_MEM, q + 0xb8, (uintptr_t)&sv, 8);
+                            if (sv == expected_csw) { cdev = q; break; }
+                        }
+                    }
+                }
+                if (cdev) {
+                    kekcall(KEKCALL_DUMP_MEM, cdev + 0xb8, (uintptr_t)&si_devsw, 8);
+                    kekcall(KEKCALL_DUMP_MEM, cdev + 0xe0, (uintptr_t)si_name, 32);
+                    si_name[31] = 0;
+                    kekcall(KEKCALL_DUMP_MEM, cdev + 0xa8, (uintptr_t)&softc, 8);
+                    dev_sec = cdev + 0xb0;
+                    kekcall(KEKCALL_DUMP_MEM, dev_sec + 0x10, (uintptr_t)&arm_target, 8);
+                    if (softc) {
+                        kekcall(KEKCALL_DUMP_MEM, softc + 0x6a8, (uintptr_t)&dba, 8);
+                        kekcall(KEKCALL_DUMP_MEM, softc + 0x6b0, (uintptr_t)&dbb, 8);
+                        kekcall(KEKCALL_DUMP_MEM, softc + 0x6b8, (uintptr_t)&dbc, 8);
+                    }
+                }
+            }
+        }
+    }
+    klog_printf("[RESOLVE] pid=%u proc=0x%llx cdev=0x%llx softc=0x%llx si_name='%s' dbc=0x%llx\n",
+                my_pid, (unsigned long long)my_proc, (unsigned long long)cdev,
+                (unsigned long long)softc, si_name, (unsigned long long)dbc);
+    close(fd);
+
+    uint8_t out[64];
+    __builtin_memcpy(out +  0, &cdev,       8);
+    __builtin_memcpy(out +  8, &softc,      8);
+    __builtin_memcpy(out + 16, &dev_sec,    8);
+    __builtin_memcpy(out + 24, &si_devsw,   8);
+    __builtin_memcpy(out + 32, &arm_target, 8);
+    __builtin_memcpy(out + 40, &dba,        8);
+    __builtin_memcpy(out + 48, &dbb,        8);
+    __builtin_memcpy(out + 56, &dbc,        8);
+    return send_response(rpcfd, 0, out, 64);
 }
 
 /* Returns 1 continue, 0 drop client, -1 shutdown server. */
@@ -917,6 +1119,8 @@ static int serve_one(int fd)
     case RPC_CMD_A53_SDBGP_TX: rc = handle_a53_sdbgp_tx(fd, args, alen); break;
     case RPC_CMD_A53_SESSION_RUN: rc = handle_a53_session_run(fd, args, alen); break;
     case RPC_CMD_A53_KEKCALL_DUMP: rc = handle_a53_kekcall_dump(fd, args, alen); break;
+    case RPC_CMD_RESOLVE_FD_CDEV: rc = handle_resolve_fd_cdev(fd, args, alen); break;
+    case RPC_CMD_KEKCALL_FULL: rc = handle_kekcall_full(fd, args, alen); break;
     case RPC_CMD_EXIT:    send_response(fd, 0, NULL, 0); free(args); return -1;
     default:              rc = send_response(fd, RPC_ERR_PROTO, NULL, 0); break;
     }
